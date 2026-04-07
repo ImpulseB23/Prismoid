@@ -132,16 +132,16 @@ jobs:
         run: bun install --frozen-lockfile
 
       - name: Type check
-        run: bun tsc --noEmit
+        run: bunx tsc --noEmit
 
       - name: Lint
-        run: bun eslint .
+        run: bunx eslint .
 
       - name: Format check
-        run: bun prettier --check .
+        run: bunx prettier --check .
 
       - name: Test with coverage
-        run: bun vitest run --coverage
+        run: bunx vitest run --coverage
 
       - name: Upload coverage
         uses: codecov/codecov-action@v6

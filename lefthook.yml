@@ -23,15 +23,15 @@ pre-commit:
 
     - name: eslint
       glob: "*.{ts,tsx}"
-      run: bun eslint {staged_files}
+      run: bunx eslint {staged_files}
 
     - name: prettier
       glob: "*.{ts,tsx,json,css,html}"
-      run: bun prettier --check {staged_files}
+      run: bunx prettier --check {staged_files}
 
     - name: tsc
       glob: "*.{ts,tsx}"
-      run: bun tsc --noEmit
+      run: bunx tsc --noEmit
 
 pre-push:
   parallel: true
@@ -45,4 +45,4 @@ pre-push:
       run: go test ./...
 
     - name: vitest
-      run: bun vitest run
+      run: bunx vitest run
