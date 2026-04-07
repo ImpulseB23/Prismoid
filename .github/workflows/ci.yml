@@ -101,7 +101,6 @@ jobs:
           files: src-tauri/coverage-rust.lcov
           flags: rust
 
-
       - name: Audit
         run: |
           cargo install cargo-audit --quiet
@@ -136,7 +135,6 @@ jobs:
           files: src-sidecar/coverage.txt
           flags: go
 
-
   typescript:
     name: TypeScript
     needs: changes
@@ -169,7 +167,6 @@ jobs:
         with:
           files: coverage/lcov.info
           flags: typescript
-
 
   build:
     name: Build
