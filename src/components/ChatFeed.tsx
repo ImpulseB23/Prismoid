@@ -23,12 +23,14 @@ const ChatFeed: Component = () => {
     scrollToBottom();
   });
 
-  onMount(async () => {
-    const unlisten = await listen<ChatMessage[]>("chat_messages", (event) => {
+  onMount(() => {
+    listen<ChatMessage[]>("chat_messages", (event) => {
       addMessages(event.payload);
-    });
-
-    onCleanup(() => unlisten());
+    })
+      .then((unlisten) => onCleanup(() => unlisten()))
+      .catch((err) =>
+        console.error("failed to listen for chat messages:", err),
+      );
   });
 
   return (

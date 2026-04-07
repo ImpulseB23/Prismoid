@@ -19,8 +19,11 @@ pub fn run() {
         .plugin(tauri_plugin_shell::init())
         .invoke_handler(tauri::generate_handler![get_platform])
         .setup(|app| {
-            let window = app.get_webview_window("main").unwrap();
-            tracing::info!("prismoid starting, window: {}", window.label());
+            if let Some(window) = app.get_webview_window("main") {
+                tracing::info!("prismoid starting, window: {}", window.label());
+            } else {
+                tracing::warn!("main window not found during setup");
+            }
             Ok(())
         })
         .run(tauri::generate_context!())
