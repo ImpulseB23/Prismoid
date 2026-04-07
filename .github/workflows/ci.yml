@@ -12,7 +12,7 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
-  GO_VERSION: "1.22"
+  GO_VERSION: "1.26"
   NODE_VERSION: "20"
 
 permissions:
@@ -40,7 +40,7 @@ jobs:
             typescript:
               - 'src/**'
               - 'package.json'
-              - 'bun.lockb'
+              - 'bun.lock'
               - 'tsconfig.json'
               - 'vite.config.*'
 

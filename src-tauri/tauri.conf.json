@@ -1,0 +1,43 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Prismoid",
+  "version": "0.0.1",
+  "identifier": "org.prismoid.app",
+  "build": {
+    "beforeDevCommand": "bun dev",
+    "beforeBuildCommand": "bun build",
+    "devUrl": "http://localhost:5173",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "withGlobalTauri": false,
+    "windows": [
+      {
+        "title": "Prismoid",
+        "width": 400,
+        "height": 700,
+        "minWidth": 320,
+        "minHeight": 400,
+        "resizable": true,
+        "center": true
+      }
+    ]
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "externalBin": ["binaries/sidecar"],
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ]
+  },
+  "plugins": {
+    "shell": {
+      "open": false
+    }
+  }
+}
