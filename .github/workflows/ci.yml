@@ -16,8 +16,34 @@ env:
   NODE_VERSION: "20"
 
 jobs:
+  changes:
+    name: Detect Changes
+    runs-on: ubuntu-latest
+    outputs:
+      rust: ${{ steps.filter.outputs.rust }}
+      go: ${{ steps.filter.outputs.go }}
+      typescript: ${{ steps.filter.outputs.typescript }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            rust:
+              - 'src-tauri/**'
+            go:
+              - 'src-sidecar/**'
+            typescript:
+              - 'src/**'
+              - 'package.json'
+              - 'pnpm-lock.yaml'
+              - 'tsconfig.json'
+              - 'vite.config.*'
+
   rust:
     name: Rust
+    needs: changes
+    if: needs.changes.outputs.rust == 'true'
     runs-on: windows-latest
     defaults:
       run:
@@ -65,6 +91,8 @@ jobs:
 
   go:
     name: Go
+    needs: changes
+    if: needs.changes.outputs.go == 'true'
     runs-on: windows-latest
     defaults:
       run:
@@ -92,6 +120,8 @@ jobs:
 
   typescript:
     name: TypeScript
+    needs: changes
+    if: needs.changes.outputs.typescript == 'true'
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
@@ -127,7 +157,13 @@ jobs:
 
   build:
     name: Build
-    needs: [rust, go, typescript]
+    needs: [changes, rust, go, typescript]
+    if: |
+      always() &&
+      (needs.rust.result == 'success' || needs.rust.result == 'skipped') &&
+      (needs.go.result == 'success' || needs.go.result == 'skipped') &&
+      (needs.typescript.result == 'success' || needs.typescript.result == 'skipped') &&
+      (needs.changes.outputs.rust == 'true' || needs.changes.outputs.go == 'true' || needs.changes.outputs.typescript == 'true')
     strategy:
       fail-fast: false
       matrix:
