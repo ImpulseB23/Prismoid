@@ -100,7 +100,7 @@ jobs:
         with:
           files: src-tauri/coverage-rust.lcov
           flags: rust
-          token: ${{ secrets.CODECOV_TOKEN }}
+
 
       - name: Audit
         run: |
@@ -135,7 +135,7 @@ jobs:
         with:
           files: src-sidecar/coverage.txt
           flags: go
-          token: ${{ secrets.CODECOV_TOKEN }}
+
 
   typescript:
     name: TypeScript
@@ -169,7 +169,7 @@ jobs:
         with:
           files: coverage/lcov.info
           flags: typescript
-          token: ${{ secrets.CODECOV_TOKEN }}
+
 
   build:
     name: Build
