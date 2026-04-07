@@ -1,0 +1,12 @@
+[files]
+extend-exclude = [
+  "bun.lock",
+  "src-tauri/Cargo.lock",
+  "src-sidecar/go.sum",
+  "src-tauri/icons/",
+  "node_modules/",
+  "target/",
+]
+
+[default.extend-words]
+ot = "ot"

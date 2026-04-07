@@ -69,6 +69,6 @@ Tests run on every PR via GitHub Actions. The CI workflow gates merge on:
 2. `cargo clippy -- -D warnings` passes
 3. `go test ./...` passes
 4. `go vet ./...` passes
-5. `pnpm vitest run` passes
-6. `pnpm tsc --noEmit` passes
+5. `bun vitest run` passes
+6. `bun tsc --noEmit` passes
 7. E2E tests pass (on scheduled CI runs, not every PR, since they require a full build)
