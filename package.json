@@ -13,7 +13,8 @@
     "lint": "eslint .",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "prepare": "lefthook install"
   },
   "dependencies": {
     "@tauri-apps/api": "^2.10.1",
@@ -26,6 +27,7 @@
     "@vitest/coverage-v8": "^3.2.1",
     "eslint": "^9.25.0",
     "jsdom": "^29.0.2",
+    "lefthook": "^2.1.5",
     "prettier": "^3.5.3",
     "typescript": "^6.0.2",
     "typescript-eslint": "^8.58.0",
