@@ -1,3 +1,4 @@
+#[allow(dead_code)]
 mod message;
 
 use tauri::Manager;
