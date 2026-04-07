@@ -11,8 +11,7 @@ fn get_platform() -> &'static str {
 pub fn run() {
     tracing_subscriber::fmt()
         .with_env_filter(
-            EnvFilter::from_default_env()
-                .add_directive("prismoid=debug".parse().unwrap()),
+            EnvFilter::from_default_env().add_directive("prismoid=debug".parse().unwrap()),
         )
         .init();
 
