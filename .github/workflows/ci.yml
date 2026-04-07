@@ -173,6 +173,7 @@ jobs:
     name: Build
     needs: [changes, rust, go, typescript]
     if: |
+      github.event_name == 'push' &&
       always() &&
       (needs.rust.result == 'success' || needs.rust.result == 'skipped') &&
       (needs.go.result == 'success' || needs.go.result == 'skipped') &&
@@ -188,9 +189,12 @@ jobs:
             args: "--target aarch64-apple-darwin"
           - platform: macos-latest
             args: "--target x86_64-apple-darwin"
-          - platform: ubuntu-22.04
+          - platform: ubuntu-latest
             args: ""
     runs-on: ${{ matrix.platform }}
+    defaults:
+      run:
+        shell: bash
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
 
@@ -221,7 +225,11 @@ jobs:
 
       - name: Build Go sidecar
         working-directory: src-sidecar
-        run: go build -o ../src-tauri/binaries/ ./cmd/sidecar
+        run: |
+          target=$(rustc -vV | grep host | cut -d' ' -f2)
+          ext=""
+          [[ "$target" == *windows* ]] && ext=".exe"
+          go build -o "../src-tauri/binaries/sidecar-${target}${ext}" ./cmd/sidecar
 
       - uses: tauri-apps/tauri-action@84b9d35b5fc46c1e45415bdb6144030364f7ebc5 # v0.6.2
         env:
