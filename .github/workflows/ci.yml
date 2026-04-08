@@ -13,7 +13,6 @@ concurrency:
 env:
   CARGO_TERM_COLOR: always
   GO_VERSION: "1.26"
-  NODE_VERSION: "20"
 
 permissions:
   contents: read
@@ -34,15 +33,16 @@ jobs:
         with:
           filters: |
             rust:
-              - 'src-tauri/**'
+              - 'apps/desktop/src-tauri/**'
             go:
-              - 'src-sidecar/**'
+              - 'apps/desktop/src-sidecar/**'
             typescript:
-              - 'src/**'
-              - 'package.json'
-              - 'bun.lock'
-              - 'tsconfig.json'
-              - 'vite.config.*'
+              - 'apps/desktop/src/**'
+              - 'apps/desktop/package.json'
+              - 'apps/desktop/bun.lock'
+              - 'apps/desktop/tsconfig.json'
+              - 'apps/desktop/vite.config.*'
+              - 'apps/desktop/eslint.config.*'
 
   rust:
     name: Rust
@@ -52,7 +52,7 @@ jobs:
     defaults:
       run:
         shell: bash
-        working-directory: src-tauri
+        working-directory: apps/desktop/src-tauri
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
 
@@ -62,16 +62,16 @@ jobs:
 
       - uses: swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2.9.1
         with:
-          workspaces: "./src-tauri -> target"
+          workspaces: "./apps/desktop/src-tauri -> target"
           cache-on-failure: true
 
       - uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6.4.0
         with:
           go-version: ${{ env.GO_VERSION }}
-          cache-dependency-path: src-sidecar/go.sum
+          cache-dependency-path: apps/desktop/src-sidecar/go.sum
 
       - name: Build Go sidecar
-        working-directory: src-sidecar
+        working-directory: apps/desktop/src-sidecar
         run: |
           target=$(rustc -vV | grep host | cut -d' ' -f2)
           ext=""
@@ -100,7 +100,7 @@ jobs:
         uses: codecov/codecov-action@57e3a136b779b570ffcdbf80b3bdc90e7fab3de2 # v6.0.0
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
-          files: src-tauri/coverage-rust.lcov
+          files: apps/desktop/src-tauri/coverage-rust.lcov
           flags: rust
 
       - name: Audit
@@ -116,14 +116,14 @@ jobs:
     defaults:
       run:
         shell: bash
-        working-directory: src-sidecar
+        working-directory: apps/desktop/src-sidecar
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
 
       - uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6.4.0
         with:
           go-version: ${{ env.GO_VERSION }}
-          cache-dependency-path: src-sidecar/go.sum
+          cache-dependency-path: apps/desktop/src-sidecar/go.sum
 
       - name: Vet
         run: go vet ./...
@@ -141,7 +141,7 @@ jobs:
         uses: codecov/codecov-action@57e3a136b779b570ffcdbf80b3bdc90e7fab3de2 # v6.0.0
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
-          files: src-sidecar/coverage.txt
+          files: apps/desktop/src-sidecar/coverage.txt
           flags: go
 
   typescript:
@@ -149,6 +149,9 @@ jobs:
     needs: changes
     if: needs.changes.outputs.typescript == 'true'
     runs-on: windows-latest
+    defaults:
+      run:
+        working-directory: apps/desktop
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
 
@@ -175,5 +178,5 @@ jobs:
         uses: codecov/codecov-action@57e3a136b779b570ffcdbf80b3bdc90e7fab3de2 # v6.0.0
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
-          files: coverage/lcov.info
+          files: apps/desktop/coverage/lcov.info
           flags: typescript

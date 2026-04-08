@@ -7,8 +7,8 @@ Thanks for your interest in contributing to Prismoid.
 1. Fork the repo
 2. Clone your fork
 3. Install prerequisites: Rust toolchain, Go 1.26+, Node.js 20+, bun
-4. Run `bun install` to install frontend dependencies and set up git hooks (lefthook)
-5. Run `cargo tauri dev` to start the app in development mode
+4. Run `cd apps/desktop && bun install` to install frontend dependencies and set up git hooks (lefthook)
+5. Run `cargo tauri dev` from `apps/desktop` to start the app in development mode
 
 ## Before You Code
 

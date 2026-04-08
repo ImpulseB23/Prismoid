@@ -1,19 +1,19 @@
 rust:
   - changed-files:
-      - any-glob-to-any-file: "src-tauri/**"
+      - any-glob-to-any-file: "apps/desktop/src-tauri/**"
 
 go:
   - changed-files:
-      - any-glob-to-any-file: "src-sidecar/**"
+      - any-glob-to-any-file: "apps/desktop/src-sidecar/**"
 
 typescript:
   - changed-files:
       - any-glob-to-any-file:
-          - "src/**"
-          - "package.json"
-          - "bun.lock"
-          - "tsconfig.json"
-          - "vite.config.*"
+          - "apps/desktop/src/**"
+          - "apps/desktop/package.json"
+          - "apps/desktop/bun.lock"
+          - "apps/desktop/tsconfig.json"
+          - "apps/desktop/vite.config.*"
 
 docs:
   - changed-files:

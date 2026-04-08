@@ -21,6 +21,7 @@ Unified live chat for streamers. Merges Twitch, YouTube, and Kick chat into a si
 Prerequisites: Rust toolchain, Go 1.26+, Node.js 20+, bun
 
 ```bash
+cd apps/desktop
 bun install
 cargo tauri dev
 ```

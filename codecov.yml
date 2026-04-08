@@ -11,22 +11,22 @@ coverage:
 flags:
   rust:
     paths:
-      - src-tauri/
+      - apps/desktop/src-tauri/
     carryforward: true
   go:
     paths:
-      - src-sidecar/
+      - apps/desktop/src-sidecar/
     carryforward: true
   typescript:
     paths:
-      - src/
+      - apps/desktop/src/
     carryforward: true
 
 ignore:
-  - "src-tauri/target/"
-  - "src-tauri/gen/"
-  - "node_modules/"
-  - "dist/"
+  - "apps/desktop/src-tauri/target/"
+  - "apps/desktop/src-tauri/gen/"
+  - "apps/desktop/node_modules/"
+  - "apps/desktop/dist/"
 
 comment:
   layout: "reach,diff,flags"
