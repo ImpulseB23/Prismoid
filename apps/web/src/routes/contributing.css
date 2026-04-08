@@ -71,6 +71,47 @@
   color: var(--text);
 }
 
+.prose img {
+  max-width: 100%;
+  height: auto;
+}
+
+.prose p > a > img {
+  display: inline-block;
+  vertical-align: middle;
+  margin-right: var(--space-sm);
+  margin-bottom: var(--space-sm);
+}
+
+.prose table {
+  width: 100%;
+  border-collapse: collapse;
+  margin-bottom: var(--space-md);
+  border: 1px solid var(--border);
+}
+
+.prose th,
+.prose td {
+  text-align: left;
+  padding: 0.625rem 0.75rem;
+  border-bottom: 1px solid var(--border);
+}
+
+.prose th + th,
+.prose td + td {
+  border-left: 1px solid var(--border);
+}
+
+.prose th {
+  color: var(--text);
+  font-weight: 600;
+}
+
+.prose td {
+  color: var(--text-muted);
+  vertical-align: top;
+}
+
 .prose code {
   font-family: var(--font-mono);
   font-size: 0.9em;

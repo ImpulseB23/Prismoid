@@ -1,22 +1,11 @@
-<p align="center">
-  <picture>
-    <source srcset="assets/icon-white.svg" media="(prefers-color-scheme: dark)" />
-    <img src="assets/icon.svg" alt="prismoid" width="120" />
-  </picture>
-</p>
+# <picture><source srcset="assets/icon-white.svg" media="(prefers-color-scheme: dark)" /><img src="assets/icon.svg" alt="prismoid" width="20" /></picture> prismoid
 
-<h1 align="center">prismoid</h1>
+unified live chat for streamers
 
-<p align="center">
-  unified live chat for streamers
-</p>
-
-<p align="center">
-  <a href="https://prismoid.org">website</a> &middot;
-  <a href="https://github.com/ImpulseB23/Prismoid/releases">download</a> &middot;
-  <a href="CONTRIBUTING.md">contribute</a> &middot;
-  <a href="docs/">docs</a>
-</p>
+[![website](https://img.shields.io/badge/website-prismoid.org-2ea043?style=for-the-badge&logo=googlechrome&logoColor=white)](https://prismoid.org)
+[![download](https://img.shields.io/badge/download-latest%20release-2ea043?style=for-the-badge&logo=github&logoColor=white)](https://github.com/ImpulseB23/Prismoid/releases/latest)
+[![contribute](https://img.shields.io/badge/contribute-open%20guide-238636?style=for-the-badge&logo=git&logoColor=white)](CONTRIBUTING.md)
+[![docs](https://img.shields.io/badge/docs-architecture%20notes-1f6feb?style=for-the-badge&logo=readthedocs&logoColor=white)](docs/)
 
 ---
 
@@ -30,11 +19,22 @@ merges Twitch, YouTube, and Kick chat into a single window with cross-platform m
 
 ## stack
 
-|                          |                                                          |
-| ------------------------ | -------------------------------------------------------- |
-| **Rust** (Tauri 2)       | desktop shell, message processing, emote scanning        |
-| **Go** (sidecar)         | network I/O, WebSocket connections, OAuth, platform APIs |
-| **TypeScript** (SolidJS) | frontend UI, virtual scrolling, emote rendering          |
+<table>
+	<tbody>
+		<tr>
+			<td><strong>Rust</strong> (Tauri 2)</td>
+			<td>desktop shell, message processing, emote scanning</td>
+		</tr>
+		<tr>
+			<td><strong>Go</strong> (sidecar)</td>
+			<td>network I/O, WebSocket connections, OAuth, platform APIs</td>
+		</tr>
+		<tr>
+			<td><strong>TypeScript</strong> (SolidJS)</td>
+			<td>frontend UI, virtual scrolling, emote rendering</td>
+		</tr>
+	</tbody>
+</table>
 
 ## development
 
