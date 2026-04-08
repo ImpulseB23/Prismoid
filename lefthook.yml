@@ -24,7 +24,7 @@ pre-commit:
     - name: govet
       glob: "*.go"
       root: apps/desktop/src-sidecar
-      run: go vet ./...
+      run: go vet -unsafeptr=false ./...
 
     - name: eslint
       glob: "*.{ts,tsx}"

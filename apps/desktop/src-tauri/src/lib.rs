@@ -1,5 +1,6 @@
 #[allow(dead_code)]
 mod message;
+pub mod ringbuf;
 
 use tauri::Manager;
 use tracing_subscriber::EnvFilter;
