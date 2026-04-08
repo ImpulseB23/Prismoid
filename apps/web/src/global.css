@@ -1,0 +1,203 @@
+/* fonts - self-hosted to prevent FOUC */
+@font-face {
+  font-family: "JetBrains Mono";
+  font-style: normal;
+  font-weight: 400 800;
+  font-display: swap;
+  src: url("/fonts/jetbrains-mono-latin.woff2") format("woff2");
+  unicode-range:
+    U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC,
+    U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212,
+    U+2215, U+FEFF, U+FFFD;
+}
+
+@font-face {
+  font-family: "Outfit";
+  font-style: normal;
+  font-weight: 300 600;
+  font-display: swap;
+  src: url("/fonts/outfit-latin.woff2") format("woff2");
+  unicode-range:
+    U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC,
+    U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212,
+    U+2215, U+FEFF, U+FFFD;
+}
+
+:root {
+  /* base - derived from logo prism grays */
+  --color-base-900: #0e0e10;
+  --color-base-800: #1a1a1d;
+  --color-base-700: #2b2b2b;
+  --color-base-600: #3f3f3f;
+  --color-base-500: #5a5a5a;
+  --color-base-400: #8f8f8f;
+  --color-base-300: #adadb8;
+  --color-base-200: #d1d1d6;
+  --color-base-100: #efeff1;
+  --color-base-50: #ffffff;
+
+  /* accent - from logo refraction colors, also platform brand colors */
+  --color-purple: #6f38c9;
+  --color-purple-light: #8b5fc8;
+  --color-red: #ea3247;
+  --color-red-light: #f0566a;
+  --color-green: #4db332;
+  --color-green-light: #6bc955;
+
+  /* semantic */
+  --bg: var(--color-base-900);
+  --bg-raised: var(--color-base-800);
+  --bg-surface: var(--color-base-700);
+  --border: var(--color-base-700);
+  --text: var(--color-base-100);
+  --text-muted: var(--color-base-300);
+  --text-faint: var(--color-base-400);
+
+  /* platform colors */
+  --twitch: var(--color-purple);
+  --youtube: var(--color-red);
+  --kick: var(--color-green);
+
+  /* typography */
+  --font-mono: "JetBrains Mono", monospace;
+  --font-sans: "Outfit", sans-serif;
+
+  /* spacing (rem-based, scales with user font size) */
+  --space-xs: 0.25rem;
+  --space-sm: 0.5rem;
+  --space-md: 1rem;
+  --space-lg: 1.5rem;
+  --space-xl: 2rem;
+  --space-2xl: 3rem;
+  --space-3xl: 4rem;
+  --space-4xl: 5rem;
+
+  /* radius (px - decorative, shouldn't scale) */
+  --radius-sm: 4px;
+  --radius-md: 8px;
+  --radius-lg: 12px;
+}
+
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+html {
+  scroll-behavior: smooth;
+  -webkit-font-smoothing: antialiased;
+  color-scheme: dark;
+}
+
+body {
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--font-sans);
+  line-height: 1.6;
+  overflow-x: hidden;
+}
+
+a {
+  color: inherit;
+  text-decoration: none;
+}
+
+/* buttons */
+.btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  font-family: var(--font-mono);
+  font-size: 0.875rem;
+  font-weight: 600;
+  padding: 0.75rem 1.5rem;
+  border-radius: var(--radius-md);
+  border: 1px solid transparent;
+  cursor: pointer;
+  transition:
+    opacity 0.15s,
+    border-color 0.2s,
+    color 0.2s;
+}
+
+.btn svg {
+  width: 1rem;
+  height: 1rem;
+  flex-shrink: 0;
+}
+
+.btn-primary {
+  color: var(--color-base-50);
+  background: var(--color-purple);
+  border-color: var(--color-purple);
+}
+
+.btn-primary:hover {
+  opacity: 0.85;
+}
+
+.btn-disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+  pointer-events: none;
+}
+
+.btn-outline {
+  color: var(--text-muted);
+  background: transparent;
+  border-color: var(--border);
+}
+
+.btn-outline:hover {
+  border-color: var(--color-purple);
+  color: var(--text);
+}
+
+/* layout */
+.container {
+  max-width: 60rem;
+  margin: 0 auto;
+  padding: 0 var(--space-lg);
+}
+
+/* error pages */
+.error-page {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+}
+
+.error-page h1 {
+  font-family: var(--font-mono);
+  font-size: 4rem;
+  font-weight: 800;
+  letter-spacing: -0.04em;
+  color: var(--text-faint);
+  margin-bottom: var(--space-sm);
+}
+
+.error-page p {
+  color: var(--text-muted);
+  font-weight: 300;
+  margin-bottom: var(--space-xl);
+}
+
+.error-page .error-detail {
+  font-family: var(--font-mono);
+  font-size: 0.8125rem;
+  color: var(--text-faint);
+  margin-bottom: var(--space-xl);
+}
+
+.section-label {
+  font-family: var(--font-mono);
+  font-size: 0.6875rem;
+  text-transform: uppercase;
+  letter-spacing: 0.15em;
+  color: var(--text-muted);
+  margin-bottom: var(--space-xl);
+}

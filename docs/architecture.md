@@ -2,7 +2,7 @@
 
 ## Process Model
 
-Prismoid runs three processes:
+prismoid runs three processes:
 
 1. **Tauri shell (Rust)** - the host process. Manages the window, system tray, auto-updater, and the message processing pipeline. Owns the hot path: parsing platform payloads, scanning for emotes via aho-corasick, normalizing messages into the unified format, and batching IPC to the frontend.
 

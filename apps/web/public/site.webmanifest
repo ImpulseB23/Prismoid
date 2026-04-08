@@ -1,7 +1,7 @@
 {
-  "name": "Prismoid",
-  "short_name": "Prismoid",
-  "description": "Unified live chat for streamers",
+  "name": "prismoid",
+  "short_name": "prismoid",
+  "description": "unified live chat for streamers",
   "start_url": "/",
   "display": "standalone",
   "background_color": "#0e0e10",

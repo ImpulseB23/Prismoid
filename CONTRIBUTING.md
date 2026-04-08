@@ -1,6 +1,6 @@
 # Contributing
 
-Thanks for your interest in contributing to Prismoid.
+Thanks for your interest in contributing to prismoid.
 
 ## Getting Started
 

@@ -1,24 +1,44 @@
-# Prismoid
+<p align="center">
+  <picture>
+    <source srcset="assets/icon-white.svg" media="(prefers-color-scheme: dark)" />
+    <img src="assets/icon.svg" alt="prismoid" width="120" />
+  </picture>
+</p>
 
-Unified live chat for streamers. Merges Twitch, YouTube, and Kick chat into a single window with cross-platform moderation and universal emote rendering.
+<h1 align="center">prismoid</h1>
 
-## What it does
+<p align="center">
+  unified live chat for streamers
+</p>
 
-- One chat feed from all platforms. Messages from Twitch and YouTube (Kick later) appear in a single unified stream
-- Mod from one place. Ban, timeout, and delete messages regardless of which platform they came from
-- Emotes everywhere. 7TV, BTTV, FFZ, and native platform emotes render in all chats, including YouTube
-- OBS overlay. Browser source URL that renders clean unified chat with no platform indicators
-- No cloud backend. The app talks directly to platform APIs from your machine. No subscription required
+<p align="center">
+  <a href="https://prismoid.org">website</a> &middot;
+  <a href="https://github.com/ImpulseB23/Prismoid/releases">download</a> &middot;
+  <a href="CONTRIBUTING.md">contribute</a> &middot;
+  <a href="docs/">docs</a>
+</p>
 
-## Stack
+---
 
-- **Rust** (Tauri 2) - desktop shell, message processing, emote scanning
-- **Go** (sidecar) - network connections, OAuth, platform APIs
-- **TypeScript** (SolidJS) - frontend UI, virtual scrolling, emote rendering
+merges Twitch, YouTube, and Kick chat into a single window with cross-platform moderation and universal emote rendering.
 
-## Development
+- **one feed** from all platforms in a single stream
+- **mod from one place** - ban, timeout, delete regardless of source platform
+- **emotes everywhere** - 7TV, BTTV, FFZ render in all chats, including YouTube
+- **OBS overlay** - browser source for clean unified chat on stream
+- **no cloud backend** - talks directly to platform APIs from your machine
 
-Prerequisites: Rust toolchain, Go 1.26+, Node.js 20+, bun
+## stack
+
+|                          |                                                          |
+| ------------------------ | -------------------------------------------------------- |
+| **Rust** (Tauri 2)       | desktop shell, message processing, emote scanning        |
+| **Go** (sidecar)         | network I/O, WebSocket connections, OAuth, platform APIs |
+| **TypeScript** (SolidJS) | frontend UI, virtual scrolling, emote rendering          |
+
+## development
+
+prerequisites: Rust toolchain, Go 1.26+, Node.js 20+, bun
 
 ```bash
 cd apps/desktop
@@ -26,10 +46,14 @@ bun install
 cargo tauri dev
 ```
 
-## Documentation
+## screenshots
 
-See [`docs/`](docs/) for architecture, platform API details, performance requirements, and decision records.
+> coming soon
 
-## License
+## docs
+
+see [`docs/`](docs/) for architecture, platform API details, performance requirements, and decision records.
+
+## license
 
 [GPL-3.0](LICENSE)

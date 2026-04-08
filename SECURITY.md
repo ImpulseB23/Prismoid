@@ -2,7 +2,7 @@
 
 ## Reporting a Vulnerability
 
-If you discover a security vulnerability in Prismoid, please report it responsibly.
+If you discover a security vulnerability in prismoid, please report it responsibly.
 
 **Email**: security@prismoid.org
 

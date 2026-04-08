@@ -27,6 +27,13 @@ Desktop.ini
 *.swp
 *.swo
 
+# Vinxi / SolidStart
+**/.vinxi/
+**/.output/
+
+# Wrangler
+**/.wrangler/
+
 # Build artifacts
 *.exe
 *.dll

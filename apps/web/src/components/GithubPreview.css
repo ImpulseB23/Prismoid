@@ -1,0 +1,92 @@
+.gh-preview-wrapper {
+  position: relative;
+  display: inline-flex;
+}
+
+.gh-preview-bridge {
+  position: absolute;
+  top: 100%;
+  left: 0;
+  width: 100%;
+  height: 0.75rem;
+}
+
+.gh-preview-card {
+  position: absolute;
+  top: calc(100% + 0.5rem);
+  left: 0;
+  z-index: 100;
+  background: var(--bg-raised);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  padding: var(--space-md);
+  min-width: 17.5rem;
+  animation: cardIn 0.15s ease;
+}
+
+@keyframes cardIn {
+  from {
+    opacity: 0;
+    transform: translateY(-4px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.gh-preview-stats {
+  display: flex;
+  gap: var(--space-md);
+  font-family: var(--font-mono);
+  font-size: 0.75rem;
+  margin-bottom: var(--space-sm);
+  padding-bottom: var(--space-sm);
+  border-bottom: 1px solid var(--border);
+}
+
+.gh-preview-stats a {
+  color: var(--text-muted);
+  transition: color 0.15s;
+}
+
+.gh-preview-stats a:hover {
+  color: var(--text);
+}
+
+.gh-preview-commit {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.gh-preview-commit a {
+  color: var(--text);
+  transition: color 0.15s;
+}
+
+.gh-preview-commit a:hover {
+  color: var(--color-purple-light);
+}
+
+.gh-preview-label {
+  font-family: var(--font-mono);
+  font-size: 0.625rem;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  color: var(--text-faint);
+}
+
+.gh-preview-msg {
+  font-family: var(--font-mono);
+  font-size: 0.8125rem;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 16.25rem;
+}
+
+.gh-preview-meta {
+  font-size: 0.6875rem;
+  color: var(--text-faint);
+}
