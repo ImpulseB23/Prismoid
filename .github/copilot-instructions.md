@@ -6,9 +6,9 @@ Prismoid is a native desktop app (Tauri 2) that merges live chat from Twitch, Yo
 
 ## Architecture Boundaries
 
-- **Rust** (src-tauri/): Tauri shell, message processing hot path, emote scanning (aho-corasick), SQLite caching, sidecar lifecycle management. All message parsing and normalization happens here.
-- **Go** (src-sidecar/): Network I/O only. WebSocket connections (Twitch EventSub, Kick Pusher), YouTube gRPC streaming, 7TV/BTTV/FFZ REST APIs, OAuth token management. Writes raw bytes to shared memory ring buffer.
-- **TypeScript** (src/): SolidJS frontend. Virtual scrolling with Pretext, emote rendering, mod action UI, settings, theming.
+- **Rust** (apps/desktop/src-tauri/): Tauri shell, message processing hot path, emote scanning (aho-corasick), SQLite caching, sidecar lifecycle management. All message parsing and normalization happens here.
+- **Go** (apps/desktop/src-sidecar/): Network I/O only. WebSocket connections (Twitch EventSub, Kick Pusher), YouTube gRPC streaming, 7TV/BTTV/FFZ REST APIs, OAuth token management. Writes raw bytes to shared memory ring buffer.
+- **TypeScript** (apps/desktop/src/): SolidJS frontend. Virtual scrolling with Pretext, emote rendering, mod action UI, settings, theming.
 
 Never put network I/O in Rust. Never put message processing in Go. Never put business logic in the frontend.
 

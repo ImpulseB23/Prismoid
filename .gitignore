@@ -1,16 +1,16 @@
 # Rust
-src-tauri/target/
+**/target/
 **/*.rs.bk
 
 # Go
-src-sidecar/bin/
+**/bin/
 
 # Node
-node_modules/
-dist/
+**/node_modules/
+**/dist/
 
 # Tauri
-src-tauri/gen/
+**/gen/
 
 # Environment
 .env
@@ -34,7 +34,7 @@ Desktop.ini
 *.dylib
 
 # Test coverage
-coverage/
+**/coverage/
 *.lcov
 
 # Logs
