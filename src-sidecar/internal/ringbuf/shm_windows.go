@@ -4,7 +4,6 @@ package ringbuf
 
 import (
 	"fmt"
-	"reflect"
 	"syscall"
 	"unsafe"
 
@@ -37,22 +36,15 @@ func OpenShared(name string, size int) ([]byte, func(), error) {
 
 	addr, err := windows.MapViewOfFile(handle, fileMapAllAccess, 0, 0, uintptr(size))
 	if err != nil {
-		windows.CloseHandle(handle)
+		_ = windows.CloseHandle(handle)
 		return nil, nil, fmt.Errorf("MapViewOfFile: %w", err)
 	}
 
-	// Convert MapViewOfFile result to a byte slice.
-	// This uses reflect.SliceHeader which is the standard pattern
-	// for go vet compliance when working with memory-mapped regions.
-	var mem []byte
-	sh := (*reflect.SliceHeader)(unsafe.Pointer(&mem))
-	sh.Data = addr
-	sh.Len = size
-	sh.Cap = size
+	mem := unsafe.Slice((*byte)(unsafe.Pointer(addr)), size)
 
 	cleanup := func() {
-		windows.UnmapViewOfFile(addr)
-		windows.CloseHandle(handle)
+		_ = windows.UnmapViewOfFile(addr)
+		_ = windows.CloseHandle(handle)
 	}
 
 	return mem, cleanup, nil
