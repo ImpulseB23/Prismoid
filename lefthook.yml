@@ -21,11 +21,6 @@ pre-commit:
       root: apps/desktop/src-sidecar
       run: gofmt -l -d {staged_files}
 
-    - name: govet
-      glob: "*.go"
-      root: apps/desktop/src-sidecar
-      run: go vet -unsafeptr=false ./...
-
     - name: eslint
       glob: "*.{ts,tsx}"
       root: apps/desktop

@@ -101,3 +101,53 @@ func TestWriteFullBuffer(t *testing.T) {
 		t.Fatal("second write should fail (buffer full)")
 	}
 }
+
+func TestOpenValidatesMemSizeForCapacity(t *testing.T) {
+	mem := make([]byte, headerSize+64)
+	// claim capacity of 1024 but buffer only has 64 bytes of data space
+	*(*uint64)(unsafe.Pointer(&mem[cacheLine*2])) = 1024
+	_, err := Open(mem)
+	if err == nil {
+		t.Fatal("expected error when mem is too small for declared capacity")
+	}
+}
+
+func TestWriteWrapsAround(t *testing.T) {
+	mem := makeBuf(32)
+	w, err := Open(mem)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// write 20 bytes (4-byte header + 16-byte payload)
+	if !w.Write(make([]byte, 16)) {
+		t.Fatal("first write should succeed")
+	}
+
+	// simulate reader consuming those 20 bytes
+	atomic.StoreUint64(w.readIndex(), 20)
+
+	// write 12-byte payload (framed: 4 + 12 = 16 bytes)
+	// write_pos=20, cap=32, offset=20%32=20, firstChunk=12
+	// length header (4 bytes at offset 20): fits without wrapping
+	// payload (12 bytes at offset 24): firstChunk=8 < 12, wraps around
+	payload := []byte("ABCDEFGHIJKL")
+	if !w.Write(payload) {
+		t.Fatal("wrapped write should succeed")
+	}
+
+	data := w.data()
+
+	msgLen := binary.BigEndian.Uint32(data[20:24])
+	if msgLen != 12 {
+		t.Fatalf("expected length=12, got %d", msgLen)
+	}
+
+	// payload: 8 bytes at [24..32), then 4 bytes at [0..4)
+	var got [12]byte
+	copy(got[:8], data[24:32])
+	copy(got[8:], data[0:4])
+	if string(got[:]) != "ABCDEFGHIJKL" {
+		t.Fatalf("expected 'ABCDEFGHIJKL', got %q", string(got[:]))
+	}
+}
