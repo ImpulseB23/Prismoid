@@ -40,7 +40,7 @@ func TestOpenSharedRoundTrip(t *testing.T) {
 	size := 4096
 
 	handle := createTestMapping(t, name, uint32(size))
-	defer windows.CloseHandle(handle)
+	defer func() { _ = windows.CloseHandle(handle) }()
 
 	mem, cleanup, err := OpenShared(name, size)
 	if err != nil {
