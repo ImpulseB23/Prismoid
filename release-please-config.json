@@ -1,6 +1,6 @@
 {
   "packages": {
-    ".": {
+    "apps/desktop": {
       "release-type": "node",
       "initial-version": "0.0.1",
       "bump-minor-pre-major": true,
