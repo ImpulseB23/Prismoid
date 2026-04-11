@@ -7,10 +7,7 @@ use tauri_plugin_shell::process::CommandEvent;
 use tauri_plugin_shell::ShellExt;
 use tracing_subscriber::EnvFilter;
 
-use host::{
-    build_bootstrap_line, build_twitch_connect_line, mark_handle_inheritable, parse_batch,
-    twitch_creds_from_env, unmark_handle_inheritable, DRAIN_INTERVAL, SIDECAR_BINARY,
-};
+use host::{parse_batch, DRAIN_INTERVAL};
 use ringbuf::{RingBufReader, DEFAULT_CAPACITY};
 
 #[tauri::command]
@@ -33,24 +30,57 @@ pub fn run() {
         .expect("failed to run prismoid");
 }
 
-/// Tauri setup hook. Creates the shm section, spawns the sidecar with the
-/// HANDLE marked inheritable, writes the bootstrap line, optionally auto-
-/// connects to Twitch with env creds, and spawns the drain task.
+/// Tauri setup hook. On Windows, creates the shm section, spawns the sidecar
+/// with the HANDLE marked inheritable, bootstraps it, and starts the drain
+/// task. On other platforms (not yet supported per ADR 18), logs a warning
+/// and lets the Tauri app launch so frontend work can proceed.
+#[allow(clippy::unnecessary_wraps)]
 fn setup<R: Runtime>(app: &mut tauri::App<R>) -> Result<(), Box<dyn std::error::Error>> {
+    #[cfg(windows)]
+    {
+        setup_sidecar(app)?;
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = app;
+        tracing::warn!(
+            "sidecar lifecycle is Windows-only for now; launching frontend without sidecar"
+        );
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+fn setup_sidecar<R: Runtime>(app: &mut tauri::App<R>) -> Result<(), Box<dyn std::error::Error>> {
+    use host::{
+        build_bootstrap_line, build_twitch_connect_line, mark_handle_inheritable,
+        twitch_creds_from_env, unmark_handle_inheritable, SIDECAR_BINARY,
+    };
+
     let reader = RingBufReader::create_owner(DEFAULT_CAPACITY)?;
     let handle = reader.raw_handle();
     let size = reader.map_size();
 
     mark_handle_inheritable(handle)?;
 
+    // RAII guard: the inheritable flag is cleared on any exit from this
+    // function, including error paths. This keeps the window where the HANDLE
+    // is inheritable as narrow as possible (effectively: the sidecar spawn).
+    // The Rust stdlib's CREATE_PROCESS_LOCK serializes our own child spawns,
+    // but un-setting the flag immediately defends against any future change
+    // where something else creates a process between mark and function exit.
+    struct InheritGuard(ringbuf::RawHandle);
+    impl Drop for InheritGuard {
+        fn drop(&mut self) {
+            if let Err(e) = unmark_handle_inheritable(self.0) {
+                tracing::error!(error = %e, "failed to un-mark handle inheritance in drop");
+            }
+        }
+    }
+    let _inherit_guard = InheritGuard(handle);
+
     let sidecar = app.shell().sidecar(SIDECAR_BINARY)?;
     let (mut rx, mut child) = sidecar.spawn()?;
-
-    // Un-mark immediately so no future child spawned in this process inherits
-    // this HANDLE. The sidecar already has its own inherited copy.
-    if let Err(e) = unmark_handle_inheritable(handle) {
-        tracing::error!(error = %e, "failed to un-mark handle inheritance after spawn");
-    }
 
     let bootstrap_line = build_bootstrap_line(handle, size)?;
     child.write(&bootstrap_line)?;
@@ -67,8 +97,8 @@ fn setup<R: Runtime>(app: &mut tauri::App<R>) -> Result<(), Box<dyn std::error::
         tracing::warn!("PRISMOID_TWITCH_* env vars not all set; launching without auto-connect");
     }
 
-    // Drain sidecar CommandEvent stream for logging. This keeps stdout/stderr
-    // from piling up and surfaces termination events.
+    // Drain the sidecar's CommandEvent stream for logging. This keeps
+    // stdout/stderr from piling up and surfaces termination events.
     tauri::async_runtime::spawn(async move {
         while let Some(event) = rx.recv().await {
             match event {
