@@ -1,6 +1,18 @@
-import { Component, For, createEffect, onMount, onCleanup } from "solid-js";
-import { messages, addMessages, type ChatMessage } from "../stores/chatStore";
+import {
+  Component,
+  For,
+  createEffect,
+  createMemo,
+  onCleanup,
+  onMount,
+} from "solid-js";
 import { listen } from "@tauri-apps/api/event";
+import {
+  addMessages,
+  getMessage,
+  viewport,
+  type ChatMessage,
+} from "../stores/chatStore";
 
 const ChatFeed: Component = () => {
   let containerRef: HTMLDivElement | undefined;
@@ -18,8 +30,23 @@ const ChatFeed: Component = () => {
     userScrolledUp = scrollHeight - scrollTop - clientHeight > 40;
   };
 
+  // Derive the visible message slice from the viewport signal. The ring
+  // buffer stores stable references, so `<For>` reuses DOM nodes for messages
+  // that remain in the visible window across frames. The per-frame array
+  // allocation is bounded by maxMessages and matches ADR 21's "one viewport
+  // update per frame" contract.
+  const visibleMessages = createMemo<ChatMessage[]>(() => {
+    const v = viewport();
+    const out: ChatMessage[] = [];
+    for (let i = 0; i < v.count; i++) {
+      const msg = getMessage(v.start + i);
+      if (msg) out.push(msg);
+    }
+    return out;
+  });
+
   createEffect(() => {
-    messages();
+    visibleMessages();
     scrollToBottom();
   });
 
@@ -44,7 +71,7 @@ const ChatFeed: Component = () => {
         "will-change": "transform",
       }}
     >
-      <For each={messages()}>
+      <For each={visibleMessages()}>
         {(msg) => (
           <div style={{ padding: "2px 0", "line-height": "1.4" }}>
             <span
