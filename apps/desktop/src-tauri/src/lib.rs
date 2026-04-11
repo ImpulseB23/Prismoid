@@ -16,11 +16,17 @@ fn get_platform() -> &'static str {
 }
 
 pub fn run() {
-    // Phase 0 dev convenience: load `.env.local` from cwd or any parent before
-    // anything reads PRISMOID_TWITCH_*. Production builds with no .env.local
-    // present silently no-op (the Err is dropped). Real secret storage uses
-    // OS keychain via OAuth, see docs/platform-apis.md §Twitch.
-    let _ = dotenvy::from_filename(".env.local");
+    // Phase 0 dev convenience: in debug builds only, load `.env.local` from
+    // cwd or any parent before anything reads PRISMOID_TWITCH_*. Release
+    // builds skip this entirely so a stray file in the install dir cannot
+    // change runtime behavior. Real secret storage uses OS keychain via
+    // OAuth, see docs/platform-apis.md §Twitch.
+    #[cfg(debug_assertions)]
+    match dotenvy::from_filename(".env.local") {
+        Ok(_) => {}
+        Err(dotenvy::Error::Io(err)) if err.kind() == std::io::ErrorKind::NotFound => {}
+        Err(err) => eprintln!("failed to load .env.local: {err}"),
+    }
 
     tracing_subscriber::fmt()
         .with_env_filter(
