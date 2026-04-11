@@ -1,10 +1,32 @@
+//! SPSC shared memory ring buffer for the Go sidecar → Rust host hot path.
+//!
+//! The Rust host creates an unnamed shared memory section via [`RingBufReader::create_owner`]
+//! and obtains the raw HANDLE via [`RingBufReader::raw_handle`]. See ADR 18
+//! (revised 2026-04-11).
+//!
+//! This primitive deliberately creates the handle as **non-inheritable**. The
+//! caller (the host lifecycle) is responsible for marking the handle inheritable
+//! via `SetHandleInformation(HANDLE_FLAG_INHERIT)` immediately before spawning
+//! the sidecar and un-marking it immediately after, to minimize the race window
+//! where any other child spawned in that interval would inherit the section.
+//! See the Rust stdlib comment in `library/std/src/sys/process/windows.rs`
+//! (around the `CREATE_PROCESS_LOCK` definition) for why this window matters.
+//!
+//! Windows is the primary target; Linux and macOS return `ErrorKind::Unsupported`
+//! until their own tickets land.
+
+use std::io;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 const CACHE_LINE: usize = 64;
 const HEADER_SIZE: usize = CACHE_LINE * 3;
 
-pub const DEFAULT_CAPACITY: usize = 4 * 1024 * 1024; // 4MB
-const SHM_NAME: &str = "prismoid_ringbuf";
+pub const DEFAULT_CAPACITY: usize = 4 * 1024 * 1024; // 4MB ring data
+
+/// Portable integer representation of a platform shared memory handle.
+/// On Windows this is a `HANDLE` cast through `usize`. On POSIX platforms this
+/// will be a file descriptor packed into the same width.
+pub type RawHandle = usize;
 
 #[repr(C, align(64))]
 struct WriteSlot {
@@ -24,66 +46,191 @@ struct MetaSlot {
     _pad: [u8; CACHE_LINE - 8],
 }
 
+#[derive(Debug)]
 pub struct RingBufReader {
-    shmem: shared_memory::Shmem,
+    base: *mut u8,
+    map_size: usize,
     data_offset: usize,
+    #[cfg(windows)]
+    mapping_handle: windows::Win32::Foundation::HANDLE,
+    owner: bool,
 }
 
-impl RingBufReader {
-    pub fn create(capacity: usize) -> Result<Self, shared_memory::ShmemError> {
-        Self::create_named(SHM_NAME, capacity)
-    }
+// The reader owns a view into shared memory and is the sole consumer. Atomics
+// in the header enforce cross-process ordering, and the struct only holds raw
+// pointers into memory that is valid for the reader's lifetime.
+unsafe impl Send for RingBufReader {}
 
-    pub fn create_named(name: &str, capacity: usize) -> Result<Self, shared_memory::ShmemError> {
-        assert!(
-            capacity >= 4,
-            "ring buffer capacity must be at least 4 bytes"
-        );
+#[cfg(windows)]
+impl RingBufReader {
+    pub fn create_owner(capacity: usize) -> io::Result<Self> {
+        use windows::core::PCWSTR;
+        use windows::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE};
+        use windows::Win32::System::Memory::{
+            CreateFileMappingW, MapViewOfFile, FILE_MAP, FILE_MAP_READ, FILE_MAP_WRITE,
+            PAGE_READWRITE,
+        };
+
+        if capacity < 4 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "ring buffer capacity must be at least 4 bytes",
+            ));
+        }
+
         let total = HEADER_SIZE
             .checked_add(capacity)
-            .expect("ring buffer total size overflowed usize");
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "capacity overflow"))?;
+        let hi = ((total as u64 >> 32) & 0xFFFF_FFFF) as u32;
+        let lo = (total as u64 & 0xFFFF_FFFF) as u32;
 
-        let shmem = shared_memory::ShmemConf::new()
-            .os_id(name)
-            .size(total)
-            .create()?;
+        let handle = unsafe {
+            CreateFileMappingW(
+                INVALID_HANDLE_VALUE,
+                None,
+                PAGE_READWRITE,
+                hi,
+                lo,
+                PCWSTR::null(),
+            )
+        }
+        .map_err(windows_err)?;
 
-        let ptr = shmem.as_ptr();
+        let view = unsafe {
+            MapViewOfFile(
+                handle,
+                FILE_MAP(FILE_MAP_READ.0 | FILE_MAP_WRITE.0),
+                0,
+                0,
+                total,
+            )
+        };
+        if view.Value.is_null() {
+            let err = io::Error::last_os_error();
+            unsafe {
+                let _ = CloseHandle(handle);
+            }
+            return Err(err);
+        }
+
+        let base = view.Value as *mut u8;
 
         unsafe {
-            std::ptr::write_bytes(ptr, 0, total);
-
-            let meta_slot = &mut *(ptr.add(CACHE_LINE * 2) as *mut MetaSlot);
-            meta_slot.capacity = capacity as u64;
-
-            let write_slot = &*(ptr as *const WriteSlot);
-            let read_slot = &*(ptr.add(CACHE_LINE) as *const ReadSlot);
-            write_slot.index.store(0, Ordering::Release);
-            read_slot.index.store(0, Ordering::Release);
+            std::ptr::write_bytes(base, 0, total);
+            let meta = &mut *(base.add(CACHE_LINE * 2) as *mut MetaSlot);
+            meta.capacity = capacity as u64;
         }
 
         Ok(Self {
-            shmem,
+            base,
+            map_size: total,
             data_offset: HEADER_SIZE,
+            mapping_handle: handle,
+            owner: true,
         })
     }
 
-    pub fn os_id(&self) -> &str {
-        self.shmem.get_os_id()
+    pub fn attach(handle: RawHandle, map_size: usize) -> io::Result<Self> {
+        use windows::Win32::Foundation::HANDLE;
+        use windows::Win32::System::Memory::{
+            MapViewOfFile, UnmapViewOfFile, FILE_MAP, FILE_MAP_READ, FILE_MAP_WRITE,
+            MEMORY_MAPPED_VIEW_ADDRESS,
+        };
+
+        if map_size < HEADER_SIZE + 4 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "map_size too small for ring buffer header + minimum data",
+            ));
+        }
+
+        let mapping_handle = HANDLE(handle as *mut _);
+        let view = unsafe {
+            MapViewOfFile(
+                mapping_handle,
+                FILE_MAP(FILE_MAP_READ.0 | FILE_MAP_WRITE.0),
+                0,
+                0,
+                map_size,
+            )
+        };
+        if view.Value.is_null() {
+            return Err(io::Error::last_os_error());
+        }
+
+        // Validate the creator-written header before drain() can trust it. An
+        // invalid capacity would cause a modulo-by-zero or an out-of-bounds
+        // read once messages start flowing.
+        let base = view.Value as *mut u8;
+        let capacity = unsafe {
+            let meta = &*(base.add(CACHE_LINE * 2) as *const MetaSlot);
+            meta.capacity as usize
+        };
+        if capacity < 4 || HEADER_SIZE.saturating_add(capacity) > map_size {
+            unsafe {
+                let _ = UnmapViewOfFile(MEMORY_MAPPED_VIEW_ADDRESS {
+                    Value: base as *mut _,
+                });
+            }
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "ring buffer header capacity is invalid or exceeds mapped size",
+            ));
+        }
+
+        Ok(Self {
+            base,
+            map_size,
+            data_offset: HEADER_SIZE,
+            mapping_handle,
+            owner: false,
+        })
+    }
+
+    /// Raw handle suitable for passing to a child process via stdio bootstrap.
+    /// Only meaningful for readers created via `create_owner`.
+    pub fn raw_handle(&self) -> RawHandle {
+        self.mapping_handle.0 as RawHandle
+    }
+}
+
+#[cfg(not(windows))]
+impl RingBufReader {
+    pub fn create_owner(_capacity: usize) -> io::Result<Self> {
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "ring buffer not yet supported on this platform",
+        ))
+    }
+
+    pub fn attach(_handle: RawHandle, _map_size: usize) -> io::Result<Self> {
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "ring buffer not yet supported on this platform",
+        ))
+    }
+
+    pub fn raw_handle(&self) -> RawHandle {
+        0
+    }
+}
+
+impl RingBufReader {
+    pub fn map_size(&self) -> usize {
+        self.map_size
     }
 
     fn header(&self) -> (*const WriteSlot, *const ReadSlot, u64) {
-        let ptr = self.shmem.as_ptr();
         unsafe {
-            let write_slot = &*(ptr as *const WriteSlot);
-            let read_slot = &*(ptr.add(CACHE_LINE) as *const ReadSlot);
-            let meta = &*(ptr.add(CACHE_LINE * 2) as *const MetaSlot);
+            let write_slot = self.base as *const WriteSlot;
+            let read_slot = self.base.add(CACHE_LINE) as *const ReadSlot;
+            let meta = &*(self.base.add(CACHE_LINE * 2) as *const MetaSlot);
             (write_slot, read_slot, meta.capacity)
         }
     }
 
     fn data_ptr(&self) -> *const u8 {
-        unsafe { self.shmem.as_ptr().add(self.data_offset) }
+        unsafe { self.base.add(self.data_offset) }
     }
 
     pub fn drain(&mut self) -> Vec<Vec<u8>> {
@@ -129,7 +276,9 @@ impl RingBufReader {
 
     unsafe fn read_u32_wrapped(&self, data: *const u8, pos: usize, cap: usize) -> u32 {
         let mut buf = [0u8; 4];
-        self.read_wrapped(data, pos, cap, &mut buf);
+        unsafe {
+            self.read_wrapped(data, pos, cap, &mut buf);
+        }
         u32::from_be_bytes(buf)
     }
 
@@ -137,27 +286,57 @@ impl RingBufReader {
         let offset = pos % cap;
         let first_chunk = cap - offset;
 
-        if first_chunk >= out.len() {
-            std::ptr::copy_nonoverlapping(data.add(offset), out.as_mut_ptr(), out.len());
-        } else {
-            std::ptr::copy_nonoverlapping(data.add(offset), out.as_mut_ptr(), first_chunk);
-            std::ptr::copy_nonoverlapping(
-                data,
-                out.as_mut_ptr().add(first_chunk),
-                out.len() - first_chunk,
-            );
+        unsafe {
+            if first_chunk >= out.len() {
+                std::ptr::copy_nonoverlapping(data.add(offset), out.as_mut_ptr(), out.len());
+            } else {
+                std::ptr::copy_nonoverlapping(data.add(offset), out.as_mut_ptr(), first_chunk);
+                std::ptr::copy_nonoverlapping(
+                    data,
+                    out.as_mut_ptr().add(first_chunk),
+                    out.len() - first_chunk,
+                );
+            }
         }
     }
 }
 
-#[cfg(test)]
+impl Drop for RingBufReader {
+    fn drop(&mut self) {
+        #[cfg(windows)]
+        unsafe {
+            use windows::Win32::Foundation::CloseHandle;
+            use windows::Win32::System::Memory::{UnmapViewOfFile, MEMORY_MAPPED_VIEW_ADDRESS};
+
+            if !self.base.is_null() {
+                let addr = MEMORY_MAPPED_VIEW_ADDRESS {
+                    Value: self.base as *mut _,
+                };
+                let _ = UnmapViewOfFile(addr);
+            }
+            if self.owner {
+                let _ = CloseHandle(self.mapping_handle);
+            }
+        }
+    }
+}
+
+#[cfg(windows)]
+fn windows_err(err: windows::core::Error) -> io::Error {
+    // Preserves the HRESULT message via the windows::core::Error's Display impl
+    // rather than reducing it to a bare errno, which `from_raw_os_error(err.code().0)`
+    // would do.
+    io::Error::other(err)
+}
+
+#[cfg(all(test, windows))]
 mod tests {
     use super::*;
 
     fn write_to_buf(reader: &RingBufReader, payloads: &[&[u8]]) {
         let (write_slot, _, capacity) = reader.header();
         let cap = capacity as usize;
-        let data = reader.shmem.as_ptr() as usize + HEADER_SIZE;
+        let data = unsafe { reader.base.add(HEADER_SIZE) };
 
         unsafe {
             let mut write_pos = (*write_slot).index.load(Ordering::Relaxed) as usize;
@@ -166,44 +345,38 @@ mod tests {
                 let offset = write_pos % cap;
                 let first_chunk = cap - offset;
 
-                // write length (4 bytes), handling wrap
                 if first_chunk >= 4 {
-                    std::ptr::copy_nonoverlapping(
-                        len_bytes.as_ptr(),
-                        (data + offset) as *mut u8,
-                        4,
-                    );
+                    std::ptr::copy_nonoverlapping(len_bytes.as_ptr(), data.add(offset), 4);
                 } else {
                     std::ptr::copy_nonoverlapping(
                         len_bytes.as_ptr(),
-                        (data + offset) as *mut u8,
+                        data.add(offset),
                         first_chunk,
                     );
                     std::ptr::copy_nonoverlapping(
                         len_bytes.as_ptr().add(first_chunk),
-                        data as *mut u8,
+                        data,
                         4 - first_chunk,
                     );
                 }
 
-                // write payload, handling wrap
                 let pay_offset = (write_pos + 4) % cap;
                 let pay_first = cap - pay_offset;
                 if pay_first >= payload.len() {
                     std::ptr::copy_nonoverlapping(
                         payload.as_ptr(),
-                        (data + pay_offset) as *mut u8,
+                        data.add(pay_offset),
                         payload.len(),
                     );
                 } else {
                     std::ptr::copy_nonoverlapping(
                         payload.as_ptr(),
-                        (data + pay_offset) as *mut u8,
+                        data.add(pay_offset),
                         pay_first,
                     );
                     std::ptr::copy_nonoverlapping(
                         payload.as_ptr().add(pay_first),
-                        data as *mut u8,
+                        data,
                         payload.len() - pay_first,
                     );
                 }
@@ -217,21 +390,28 @@ mod tests {
     }
 
     #[test]
+    fn rejects_capacity_too_small() {
+        let err = RingBufReader::create_owner(2).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
+    }
+
+    #[test]
+    fn create_default_capacity() {
+        let reader = RingBufReader::create_owner(DEFAULT_CAPACITY).unwrap();
+        assert!(reader.map_size() >= DEFAULT_CAPACITY + HEADER_SIZE);
+        assert!(reader.raw_handle() != 0);
+    }
+
+    #[test]
     fn create_and_drain_empty() {
-        let mut reader = RingBufReader::create_named("test_drain_empty_2", 4096).unwrap();
+        let mut reader = RingBufReader::create_owner(4096).unwrap();
         let messages = reader.drain();
         assert!(messages.is_empty());
     }
 
     #[test]
-    fn create_default_and_os_id() {
-        let reader = RingBufReader::create(4096).unwrap();
-        assert!(reader.os_id().contains(SHM_NAME));
-    }
-
-    #[test]
     fn write_and_read_single_message() {
-        let mut reader = RingBufReader::create_named("test_single_msg_2", 4096).unwrap();
+        let mut reader = RingBufReader::create_owner(4096).unwrap();
         write_to_buf(&reader, &[b"hello world"]);
 
         let messages = reader.drain();
@@ -241,7 +421,7 @@ mod tests {
 
     #[test]
     fn write_and_read_multiple_messages() {
-        let mut reader = RingBufReader::create_named("test_multi_msg_2", 4096).unwrap();
+        let mut reader = RingBufReader::create_owner(4096).unwrap();
         write_to_buf(&reader, &[b"msg1", b"msg two", b"third message"]);
 
         let messages = reader.drain();
@@ -253,15 +433,15 @@ mod tests {
 
     #[test]
     fn drain_stops_on_corrupt_length() {
-        let mut reader = RingBufReader::create_named("test_corrupt_len", 256).unwrap();
+        let mut reader = RingBufReader::create_owner(256).unwrap();
         let (write_slot, _, _) = reader.header();
-        let data = reader.shmem.as_ptr() as usize + HEADER_SIZE;
+        let data = unsafe { reader.base.add(HEADER_SIZE) };
 
         let bad_len: u32 = 257;
         let len_bytes = bad_len.to_be_bytes();
 
         unsafe {
-            std::ptr::copy_nonoverlapping(len_bytes.as_ptr(), data as *mut u8, 4);
+            std::ptr::copy_nonoverlapping(len_bytes.as_ptr(), data, 4);
             (*write_slot)
                 .index
                 .store(4 + bad_len as u64, Ordering::Release);
@@ -273,14 +453,14 @@ mod tests {
 
     #[test]
     fn drain_stops_on_partial_message() {
-        let mut reader = RingBufReader::create_named("test_partial_msg", 4096).unwrap();
+        let mut reader = RingBufReader::create_owner(4096).unwrap();
         let (write_slot, _, _) = reader.header();
-        let data = reader.shmem.as_ptr() as usize + HEADER_SIZE;
+        let data = unsafe { reader.base.add(HEADER_SIZE) };
 
-        let len_bytes = (100u32).to_be_bytes();
+        let len_bytes = 100u32.to_be_bytes();
 
         unsafe {
-            std::ptr::copy_nonoverlapping(len_bytes.as_ptr(), data as *mut u8, 4);
+            std::ptr::copy_nonoverlapping(len_bytes.as_ptr(), data, 4);
             (*write_slot).index.store(54, Ordering::Release);
         }
 
@@ -290,7 +470,7 @@ mod tests {
 
     #[test]
     fn read_wraps_around_boundary() {
-        let mut reader = RingBufReader::create_named("test_wrap_read", 32).unwrap();
+        let mut reader = RingBufReader::create_owner(32).unwrap();
         let (write_slot, read_slot, _) = reader.header();
 
         unsafe {
@@ -303,5 +483,60 @@ mod tests {
         let messages = reader.drain();
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0], b"ABCDEFGH");
+    }
+
+    #[test]
+    fn attach_reads_through_owner_handle() {
+        // In-process exercise of the cross-process handle contract: create an
+        // owner, then open a second view on the same section via attach using
+        // the raw handle. Messages written via the owner's view are visible
+        // through the attached reader's view. The kernel section stays alive
+        // as long as the owner holds its handle.
+        let owner = RingBufReader::create_owner(4096).unwrap();
+        let handle = owner.raw_handle();
+        let size = owner.map_size();
+
+        let mut attached = RingBufReader::attach(handle, size).unwrap();
+        write_to_buf(&owner, &[b"cross-view message"]);
+
+        let messages = attached.drain();
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0], b"cross-view message");
+    }
+
+    #[test]
+    fn attach_rejects_zero_capacity_header() {
+        // Corrupt the owner's MetaSlot.capacity to 0, then try to attach via
+        // the raw handle. Attach must reject it instead of trusting the header,
+        // otherwise drain() would hit a modulo-by-zero.
+        let owner = RingBufReader::create_owner(4096).unwrap();
+        unsafe {
+            let meta = owner.base.add(CACHE_LINE * 2) as *mut MetaSlot;
+            (*meta).capacity = 0;
+        }
+        let err = RingBufReader::attach(owner.raw_handle(), owner.map_size()).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+    }
+
+    #[test]
+    fn attach_rejects_capacity_exceeding_map_size() {
+        let owner = RingBufReader::create_owner(4096).unwrap();
+        unsafe {
+            let meta = owner.base.add(CACHE_LINE * 2) as *mut MetaSlot;
+            (*meta).capacity = owner.map_size() as u64 + 1;
+        }
+        let err = RingBufReader::attach(owner.raw_handle(), owner.map_size()).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+    }
+
+    #[test]
+    fn attach_rejects_capacity_below_minimum() {
+        let owner = RingBufReader::create_owner(4096).unwrap();
+        unsafe {
+            let meta = owner.base.add(CACHE_LINE * 2) as *mut MetaSlot;
+            (*meta).capacity = 2;
+        }
+        let err = RingBufReader::attach(owner.raw_handle(), owner.map_size()).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
     }
 }

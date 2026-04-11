@@ -2,31 +2,10 @@
 
 package ringbuf
 
-import (
-	"fmt"
-	"os"
-	"syscall"
-)
+import "fmt"
 
-// OpenShared opens a named shared memory region created by the Rust host.
-func OpenShared(name string, size int) ([]byte, func(), error) {
-	path := "/dev/shm/" + name
-
-	f, err := os.OpenFile(path, os.O_RDWR, 0)
-	if err != nil {
-		return nil, nil, fmt.Errorf("open shm %s: %w", path, err)
-	}
-
-	mem, err := syscall.Mmap(int(f.Fd()), 0, size, syscall.PROT_READ|syscall.PROT_WRITE, syscall.MAP_SHARED)
-	if err != nil {
-		f.Close()
-		return nil, nil, fmt.Errorf("mmap: %w", err)
-	}
-
-	cleanup := func() {
-		syscall.Munmap(mem)
-		f.Close()
-	}
-
-	return mem, cleanup, nil
+// Attach is not yet implemented on Linux. See ADR 18 (revised 2026-04-11):
+// Linux will use memfd_create + fd passing via a subsequent ticket.
+func Attach(_ uintptr, _ int) ([]byte, func(), error) {
+	return nil, nil, fmt.Errorf("ring buffer attach not yet supported on linux")
 }
