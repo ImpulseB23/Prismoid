@@ -27,6 +27,7 @@ ignore:
   - "apps/desktop/src-tauri/gen/"
   - "apps/desktop/node_modules/"
   - "apps/desktop/dist/"
+  - "apps/desktop/src-sidecar/cmd/" # entry-point shims; logic lives in internal/sidecar
 
 comment:
   layout: "reach,diff,flags"
