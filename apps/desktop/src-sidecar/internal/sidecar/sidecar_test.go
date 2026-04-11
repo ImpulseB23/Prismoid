@@ -395,6 +395,43 @@ func TestMakeNotify_SerializesConcurrentWrites(t *testing.T) {
 // about signaling. Returns nil without side effects.
 func nopNotify(_ uintptr) error { return nil }
 
+func TestMakeSignalFunc_NoopsOnZeroEventHandle(t *testing.T) {
+	var called atomic.Bool
+	notify := func(_ uintptr) error {
+		called.Store(true)
+		return nil
+	}
+	signal := MakeSignalFunc(0, notify, zerolog.Nop())
+	signal()
+	if called.Load() {
+		t.Fatal("notify should not be called when eventHandle is 0")
+	}
+}
+
+func TestMakeSignalFunc_CallsNotifyWithEventHandle(t *testing.T) {
+	var got atomic.Uintptr
+	notify := func(h uintptr) error {
+		got.Store(h)
+		return nil
+	}
+	signal := MakeSignalFunc(0x1234, notify, zerolog.Nop())
+	signal()
+	if got.Load() != 0x1234 {
+		t.Fatalf("expected notify called with 0x1234, got %#x", got.Load())
+	}
+}
+
+func TestMakeSignalFunc_SwallowsNotifyError(t *testing.T) {
+	// A notify that returns an error must not panic or block. The error is
+	// logged at Warn level and the writer goroutine continues.
+	notify := func(_ uintptr) error {
+		return errors.New("set event failed")
+	}
+	signal := MakeSignalFunc(0x42, notify, zerolog.Nop())
+	// Must not panic.
+	signal()
+}
+
 func TestRunWithIO_AttachError(t *testing.T) {
 	// Bootstrap is valid; the AttachFunc fails. RunWithIO must propagate.
 	stdin := strings.NewReader(`{"shm_handle": 1, "shm_event_handle": 2, "shm_size": 4096}` + "\n")

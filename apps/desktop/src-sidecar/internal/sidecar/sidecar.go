@@ -96,15 +96,8 @@ func RunWithIO(
 	}
 
 	out := make(chan []byte, outChanCapacity)
-	eventHandle := boot.ShmEventHandle
-	go RunWriter(ctx, out, writer, func() {
-		if eventHandle == 0 {
-			return
-		}
-		if err := notify(eventHandle); err != nil {
-			logger.Warn().Err(err).Msg("failed to signal ring buffer event")
-		}
-	})
+	signal := MakeSignalFunc(boot.ShmEventHandle, notify, logger)
+	go RunWriter(ctx, out, writer, signal)
 
 	return RunCommandLoop(ctx, scanner, json.NewEncoder(stdout), out, logger)
 }
@@ -112,6 +105,30 @@ func RunWithIO(
 // NotifyFunc signals the host that new data has been written to the ring
 // buffer. The production impl is ringbuf.Notify; tests inject a fake.
 type NotifyFunc func(eventHandle uintptr) error
+
+// MakeSignalFunc builds the no-argument callback that [`RunWriter`] invokes
+// after each successful ring buffer write. The callback is a thin wrapper
+// around the provided NotifyFunc that:
+//
+//   - No-ops when eventHandle is 0 (bootstrap did not include an event, e.g.
+//     under a Rust host version that pre-dates PRI-12 or on non-Windows
+//     platforms that haven't wired eventfd/Mach semaphores yet).
+//   - Logs at Warn level if the NotifyFunc returns an error, so a transient
+//     SetEvent failure shows up in the host's stderr log drain without
+//     stalling or panicking the writer goroutine.
+//
+// Extracted from the inline closure in RunWithIO so the branching logic is
+// unit-testable.
+func MakeSignalFunc(eventHandle uintptr, notify NotifyFunc, logger zerolog.Logger) func() {
+	return func() {
+		if eventHandle == 0 {
+			return
+		}
+		if err := notify(eventHandle); err != nil {
+			logger.Warn().Err(err).Msg("failed to signal ring buffer event")
+		}
+	}
+}
 
 // ReadBootstrap consumes a single line from the scanner and decodes it as a
 // control.Bootstrap message. Returns an error on EOF or invalid JSON.
