@@ -359,6 +359,37 @@ func TestRunWithIO_RingbufOpenError(t *testing.T) {
 	}
 }
 
+func TestScanCommands_SkipsInvalidJSON(t *testing.T) {
+	stdin := strings.NewReader("not json\n" + `{"cmd":"twitch_disconnect","broadcaster_id":"b1"}` + "\n")
+	scanner := readerScanner(stdin)
+	cmdCh := make(chan control.Command, 4)
+
+	scanCommands(scanner, cmdCh, zerolog.Nop())
+
+	// only the valid command should make it through
+	select {
+	case cmd := <-cmdCh:
+		if cmd.Cmd != "twitch_disconnect" {
+			t.Errorf("expected twitch_disconnect, got %s", cmd.Cmd)
+		}
+	default:
+		t.Fatal("expected one valid command on the channel")
+	}
+
+	select {
+	case extra := <-cmdCh:
+		t.Fatalf("unexpected extra command: %+v", extra)
+	default:
+	}
+}
+
+func TestMakeNotify_LogsOnEncoderError(t *testing.T) {
+	encoder := json.NewEncoder(&errWriter{err: errors.New("pipe broken")})
+	notify := makeNotify(encoder, zerolog.Nop())
+	// must not panic; error path is exercised internally
+	notify("auth_error", "anything")
+}
+
 func TestRunWithIO_HappyPath(t *testing.T) {
 	// Bootstrap valid, attach returns a real buffer, command loop runs until
 	// the context is cancelled. The writer goroutine is spawned and must drain

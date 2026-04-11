@@ -376,3 +376,101 @@ func TestReconnectErrorMessage(t *testing.T) {
 		t.Fatalf("unexpected error message: %s", got)
 	}
 }
+
+func TestClient_wsURLDefault(t *testing.T) {
+	c := &Client{}
+	if got := c.wsURL(); got != defaultWSURL {
+		t.Errorf("expected default %q, got %q", defaultWSURL, got)
+	}
+}
+
+func TestClient_wsURLOverride(t *testing.T) {
+	c := &Client{WSURL: "wss://override.example/ws"}
+	if got := c.wsURL(); got != "wss://override.example/ws" {
+		t.Errorf("expected override, got %q", got)
+	}
+}
+
+func TestClientHandlesUnknownMessageType(t *testing.T) {
+	helixSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusAccepted)
+	}))
+	defer helixSrv.Close()
+
+	wsSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := websocket.Accept(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer func() { _ = conn.CloseNow() }()
+
+		ctx := context.Background()
+		_ = conn.Write(ctx, websocket.MessageText, welcomeMsg("sess-unknown", 30))
+		_ = conn.Write(ctx, websocket.MessageText, []byte(`{"metadata":{"message_id":"u-1","message_type":"future_type","message_timestamp":"2025-01-01T00:00:05Z"},"payload":{}}`))
+		_ = conn.Write(ctx, websocket.MessageText, notificationMsg("n-after-unknown", "still working"))
+
+		time.Sleep(100 * time.Millisecond)
+		_ = conn.Close(websocket.StatusNormalClosure, "done")
+	}))
+	defer wsSrv.Close()
+
+	out := make(chan []byte, 16)
+	client := newTestClient(
+		"ws"+strings.TrimPrefix(wsSrv.URL, "http"),
+		helixSrv.URL,
+		out,
+	)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	_ = client.Run(ctx)
+
+	// the unknown type message must not break the loop; we should still see
+	// the notification that came after it
+	msgs := drainChan(out)
+	if len(msgs) < 1 {
+		t.Fatal("expected the post-unknown notification to make it through")
+	}
+}
+
+func TestClientHandlesMalformedEnvelope(t *testing.T) {
+	helixSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusAccepted)
+	}))
+	defer helixSrv.Close()
+
+	wsSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := websocket.Accept(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer func() { _ = conn.CloseNow() }()
+
+		ctx := context.Background()
+		_ = conn.Write(ctx, websocket.MessageText, welcomeMsg("sess-malformed", 30))
+		_ = conn.Write(ctx, websocket.MessageText, []byte(`not json at all`))
+		_ = conn.Write(ctx, websocket.MessageText, notificationMsg("n-after-bad", "still alive"))
+
+		time.Sleep(100 * time.Millisecond)
+		_ = conn.Close(websocket.StatusNormalClosure, "done")
+	}))
+	defer wsSrv.Close()
+
+	out := make(chan []byte, 16)
+	client := newTestClient(
+		"ws"+strings.TrimPrefix(wsSrv.URL, "http"),
+		helixSrv.URL,
+		out,
+	)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	_ = client.Run(ctx)
+
+	msgs := drainChan(out)
+	if len(msgs) < 1 {
+		t.Fatal("expected the post-malformed notification to make it through")
+	}
+}
