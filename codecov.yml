@@ -28,6 +28,8 @@ ignore:
   - "apps/desktop/node_modules/"
   - "apps/desktop/dist/"
   - "apps/desktop/src-sidecar/cmd/" # entry-point shims; logic lives in internal/sidecar
+  - "apps/desktop/src-tauri/src/lib.rs" # tauri entry + setup wiring; logic lives in host.rs
+  - "apps/desktop/src-tauri/src/main.rs" # 3-line binary shim
 
 comment:
   layout: "reach,diff,flags"

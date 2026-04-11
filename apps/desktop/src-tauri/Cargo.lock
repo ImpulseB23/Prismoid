@@ -2487,11 +2487,13 @@ dependencies = [
 name = "prismoid"
 version = "0.0.1"
 dependencies = [
+ "chrono",
  "serde",
  "serde_json",
  "tauri",
  "tauri-build",
  "tauri-plugin-shell",
+ "tokio",
  "tracing",
  "tracing-subscriber",
  "windows",
