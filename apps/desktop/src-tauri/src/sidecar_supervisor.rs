@@ -100,20 +100,12 @@ pub fn spawn<R: Runtime>(app: AppHandle<R>) {
 #[cfg(windows)]
 async fn supervise<R: Runtime>(app: AppHandle<R>, cfg: SupervisorConfig) {
     // `client_id` is a compile-time const (RFC 8252 public client; not a
-    // secret). `broadcaster_id` still comes from env until PRI-22b
-    // auto-derives it from the DCF response's user_id. Tokens themselves
-    // live in the OS keychain, seeded via `cargo run --bin prismoid_dcf`
-    // and rotated automatically below (ADR 29).
-    let Ok(broadcaster_id) = std::env::var("PRISMOID_TWITCH_BROADCASTER_ID") else {
-        tracing::error!("PRISMOID_TWITCH_BROADCASTER_ID not set; supervisor idling.");
-        return;
-    };
-    // Single-account per platform today (ADR 30): user_id defaults to
-    // broadcaster_id. An explicit env override exists for the edge case
-    // of a mod account watching a different channel.
-    let user_id =
-        std::env::var("PRISMOID_TWITCH_USER_ID").unwrap_or_else(|_| broadcaster_id.clone());
-
+    // secret). The broadcaster/user identifiers ride inside the persisted
+    // [`TwitchTokens`] itself (populated from the DCF response, stable
+    // across refresh) so the supervisor never needs env vars or user
+    // input for them. Tokens live in the OS keychain, seeded via
+    // `cargo run --bin prismoid_dcf` and rotated automatically below
+    // (ADR 29).
     let http_client = match reqwest::Client::builder()
         .redirect(reqwest::redirect::Policy::none())
         .build()
@@ -135,11 +127,10 @@ async fn supervise<R: Runtime>(app: AppHandle<R>, cfg: SupervisorConfig) {
 
         // Pull a fresh access token per iteration. Auto-refresh happens
         // inside load_or_refresh when we're within 5 min of expiry.
-        let tokens = match auth.load_or_refresh(&broadcaster_id).await {
+        let tokens = match auth.load_or_refresh().await {
             Ok(t) => t,
-            Err(AuthError::NoTokens(_)) | Err(AuthError::RefreshTokenInvalid) => {
+            Err(AuthError::NoTokens) | Err(AuthError::RefreshTokenInvalid) => {
                 tracing::warn!(
-                    broadcaster = %broadcaster_id,
                     "no valid Twitch tokens in keychain; run `cargo run --bin prismoid_dcf` to seed"
                 );
                 emit_status(&app, "waiting_for_auth", attempt, None);
@@ -159,11 +150,14 @@ async fn supervise<R: Runtime>(app: AppHandle<R>, cfg: SupervisorConfig) {
             }
         };
 
+        // Single-account per ADR 30: the authenticated Twitch user IS
+        // the broadcaster. `user_id` doubles as broadcaster_id in
+        // EventSub's `channel.chat.message` subscription condition.
         let creds = TwitchCreds {
             client_id: TWITCH_CLIENT_ID.to_owned(),
             access_token: tokens.access_token,
-            broadcaster_id: broadcaster_id.clone(),
-            user_id: user_id.clone(),
+            broadcaster_id: tokens.user_id.clone(),
+            user_id: tokens.user_id,
         };
 
         let started = Instant::now();

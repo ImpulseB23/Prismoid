@@ -4,13 +4,10 @@
 //! [`TokenStore`] for keychain persistence. ADR 37 (DCF public client)
 //! and ADR 29 (proactive 5-min refresh) are enforced here.
 //!
-//! Three operations are exposed:
-//! - [`AuthManager::load_or_refresh`] — always-fresh tokens; refreshes
-//!   in-place if within ADR 29's threshold
-//! - [`AuthManager::start_device_flow`] — kicks off DCF, returns the
-//!   verification_uri for the caller to open in a browser
-//! - [`AuthManager::complete_device_flow`] — polls the token endpoint
-//!   until the user authorizes, persists the result
+//! Single-account per ADR 30: `load_or_refresh` / `complete_device_flow`
+//! take no broadcaster_id argument — the store holds exactly one entry.
+//! The user_id + login land on the returned `TwitchTokens` (sourced from
+//! the DCF response's `UserToken.user_id` / `UserToken.login`).
 
 use std::sync::Arc;
 
@@ -89,12 +86,12 @@ impl AuthManager {
         &self.http_client
     }
 
-    /// Loads stored tokens for the broadcaster, refreshing if within
-    /// [`REFRESH_THRESHOLD_MS`] of expiry. The refreshed tokens are
-    /// persisted (Twitch rotates the refresh token on every use).
-    pub async fn load_or_refresh(&self, broadcaster_id: &str) -> Result<TwitchTokens, AuthError> {
-        let Some(stored) = self.store.load(broadcaster_id)? else {
-            return Err(AuthError::NoTokens(broadcaster_id.to_owned()));
+    /// Loads stored tokens, refreshing if within [`REFRESH_THRESHOLD_MS`]
+    /// of expiry. The refreshed tokens are persisted (Twitch rotates the
+    /// refresh token on every use).
+    pub async fn load_or_refresh(&self) -> Result<TwitchTokens, AuthError> {
+        let Some(stored) = self.store.load()? else {
+            return Err(AuthError::NoTokens);
         };
 
         if !stored.needs_refresh(Utc::now().timestamp_millis(), REFRESH_THRESHOLD_MS) {
@@ -102,7 +99,7 @@ impl AuthManager {
         }
 
         let refreshed = self.refresh_tokens(&stored).await?;
-        self.store.save(broadcaster_id, &refreshed)?;
+        self.store.save(&refreshed)?;
         Ok(refreshed)
     }
 
@@ -124,12 +121,11 @@ impl AuthManager {
     }
 
     /// Polls the Twitch token endpoint until the user authorizes the
-    /// device code. On success, the resulting tokens are persisted under
-    /// `broadcaster_id`.
+    /// device code. On success, the resulting tokens (with user_id and
+    /// login populated from the DCF response) are persisted.
     pub async fn complete_device_flow(
         &self,
         mut pending: PendingDeviceFlow,
-        broadcaster_id: &str,
     ) -> Result<TwitchTokens, AuthError> {
         let user_token = pending
             .builder
@@ -137,7 +133,7 @@ impl AuthManager {
             .await
             .map_err(classify_device_flow_error)?;
         let tokens = tokens_from_user_token(&user_token);
-        self.store.save(broadcaster_id, &tokens)?;
+        self.store.save(&tokens)?;
         Ok(tokens)
     }
 
@@ -191,6 +187,8 @@ fn tokens_from_user_token(token: &UserToken) -> TwitchTokens {
             .unwrap_or_default(),
         expires_at_ms: now_ms.saturating_add(expires_in_ms),
         scopes: token.scopes().iter().map(|s| s.to_string()).collect(),
+        user_id: token.user_id.to_string(),
+        login: token.login.to_string(),
     }
 }
 
@@ -280,28 +278,27 @@ mod tests {
         let mgr = AuthManager::builder("test-client-id")
             .build(MemoryStore::default(), test_http_client());
 
-        match mgr.load_or_refresh("b1").await {
-            Err(AuthError::NoTokens(id)) => assert_eq!(id, "b1"),
+        match mgr.load_or_refresh().await {
+            Err(AuthError::NoTokens) => {}
             other => panic!("expected NoTokens, got {other:?}"),
         }
     }
 
     #[tokio::test]
     async fn load_or_refresh_returns_fresh_tokens_verbatim() {
-        // Use a MemoryStoreHandle to share the store between manager and
-        // test assertions without having the manager take ownership.
+        // Share the store with the test via a trait wrapper around Arc.
         let store = Arc::new(MemoryStore::default());
 
         struct Handle(Arc<MemoryStore>);
         impl TokenStore for Handle {
-            fn load(&self, id: &str) -> Result<Option<TwitchTokens>, AuthError> {
-                self.0.load(id)
+            fn load(&self) -> Result<Option<TwitchTokens>, AuthError> {
+                self.0.load()
             }
-            fn save(&self, id: &str, t: &TwitchTokens) -> Result<(), AuthError> {
-                self.0.save(id, t)
+            fn save(&self, t: &TwitchTokens) -> Result<(), AuthError> {
+                self.0.save(t)
             }
-            fn delete(&self, id: &str) -> Result<(), AuthError> {
-                self.0.delete(id)
+            fn delete(&self) -> Result<(), AuthError> {
+                self.0.delete()
             }
         }
 
@@ -313,10 +310,12 @@ mod tests {
             refresh_token: "rt-fresh".into(),
             expires_at_ms: Utc::now().timestamp_millis() + 60 * 60 * 1000,
             scopes: vec!["user:read:chat".into()],
+            user_id: "570722168".into(),
+            login: "impulseb23".into(),
         };
-        store.save("b1", &fresh).unwrap();
+        store.save(&fresh).unwrap();
 
-        let got = mgr.load_or_refresh("b1").await.unwrap();
+        let got = mgr.load_or_refresh().await.unwrap();
         assert_eq!(got, fresh);
     }
 }
