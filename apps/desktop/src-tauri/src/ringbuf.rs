@@ -423,14 +423,21 @@ fn windows_err(err: windows::core::Error) -> io::Error {
     io::Error::other(err)
 }
 
-#[cfg(all(test, windows))]
-mod tests {
-    use super::*;
-
-    fn write_to_buf(reader: &RingBufReader, payloads: &[&[u8]]) {
-        let (write_slot, _, capacity) = reader.header();
+/// Raw ring write path. Production writers live in the Go sidecar; this
+/// method exists only for in-process test fixtures and the benchmark
+/// harness, which need a Rust-side producer to exercise the drain hot
+/// loop without spawning a child.
+///
+/// Gated behind `#[cfg(any(test, feature = "__bench"))]` so the writer
+/// primitive never reaches a release build, and marked `#[doc(hidden)]`
+/// so it is not part of the crate's public API surface.
+#[cfg(all(windows, any(test, feature = "__bench")))]
+impl RingBufReader {
+    #[doc(hidden)]
+    pub fn __bench_write(&self, payloads: &[&[u8]]) {
+        let (write_slot, _, capacity) = self.header();
         let cap = capacity as usize;
-        let data = unsafe { reader.base.add(HEADER_SIZE) };
+        let data = self.data_ptr() as *mut u8;
 
         unsafe {
             let mut write_pos = (*write_slot).index.load(Ordering::Relaxed) as usize;
@@ -482,6 +489,11 @@ mod tests {
                 .store(write_pos as u64, Ordering::Release);
         }
     }
+}
+
+#[cfg(all(test, windows))]
+mod tests {
+    use super::*;
 
     #[test]
     fn rejects_capacity_too_small() {
@@ -506,7 +518,7 @@ mod tests {
     #[test]
     fn write_and_read_single_message() {
         let mut reader = RingBufReader::create_owner(4096).unwrap();
-        write_to_buf(&reader, &[b"hello world"]);
+        reader.__bench_write(&[b"hello world"]);
 
         let messages = reader.drain();
         assert_eq!(messages.len(), 1);
@@ -516,7 +528,7 @@ mod tests {
     #[test]
     fn write_and_read_multiple_messages() {
         let mut reader = RingBufReader::create_owner(4096).unwrap();
-        write_to_buf(&reader, &[b"msg1", b"msg two", b"third message"]);
+        reader.__bench_write(&[b"msg1", b"msg two", b"third message"]);
 
         let messages = reader.drain();
         assert_eq!(messages.len(), 3);
@@ -572,7 +584,7 @@ mod tests {
             (*read_slot).index.store(24, Ordering::Release);
         }
 
-        write_to_buf(&reader, &[b"ABCDEFGH"]);
+        reader.__bench_write(&[b"ABCDEFGH"]);
 
         let messages = reader.drain();
         assert_eq!(messages.len(), 1);
@@ -591,7 +603,7 @@ mod tests {
         let size = owner.map_size();
 
         let mut attached = RingBufReader::attach(handle, size).unwrap();
-        write_to_buf(&owner, &[b"cross-view message"]);
+        owner.__bench_write(&[b"cross-view message"]);
 
         let messages = attached.drain();
         assert_eq!(messages.len(), 1);

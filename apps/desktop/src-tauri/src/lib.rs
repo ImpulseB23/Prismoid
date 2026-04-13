@@ -2,12 +2,21 @@ mod host;
 mod message;
 pub mod ringbuf;
 
+// Re-exports for the bench harness. Gated so the public crate surface
+// does not grow with bench-only plumbing in release builds.
+#[cfg(any(test, feature = "__bench"))]
+#[doc(hidden)]
+pub use host::parse_batch;
+#[cfg(any(test, feature = "__bench"))]
+#[doc(hidden)]
+pub use message::UnifiedMessage;
+
 use tauri::{AppHandle, Emitter, Manager, Runtime};
 use tauri_plugin_shell::process::CommandEvent;
 use tauri_plugin_shell::ShellExt;
 use tracing_subscriber::EnvFilter;
 
-use host::{parse_batch, SIGNAL_WAIT_TIMEOUT};
+use host::SIGNAL_WAIT_TIMEOUT;
 use ringbuf::{RingBufReader, WaitOutcome, DEFAULT_CAPACITY};
 
 #[tauri::command]
@@ -200,7 +209,7 @@ fn run_drain_loop<R: Runtime>(mut reader: RingBufReader, app: AppHandle<R>) {
         }
 
         batch.clear();
-        parse_batch(&raw, &mut batch);
+        host::parse_batch(&raw, &mut batch);
         if batch.is_empty() {
             continue;
         }

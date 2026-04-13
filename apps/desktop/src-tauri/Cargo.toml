@@ -28,3 +28,17 @@ windows = { version = "0.61", features = [
     "Win32_Security",
     "Win32_System_Threading",
 ] }
+
+[features]
+# Opt-in feature that exposes internal write + parse helpers to the
+# bench binary. Never enable in a release build; the exposed surface
+# includes raw ring-write primitives that skip back-pressure.
+__bench = []
+
+[dev-dependencies]
+criterion = "0.5"
+
+[[bench]]
+name = "drain_throughput"
+harness = false
+required-features = ["__bench"]
