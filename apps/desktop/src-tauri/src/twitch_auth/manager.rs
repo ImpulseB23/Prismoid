@@ -10,6 +10,7 @@
 //! the DCF response's `UserToken.user_id` / `UserToken.login`).
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use chrono::Utc;
 use twitch_oauth2::id::DeviceCodeResponse;
@@ -184,8 +185,6 @@ fn tokens_from_user_token(token: &UserToken) -> Result<TwitchTokens, AuthError> 
     let login = token.login.to_string();
     validate_identity(&user_id, &login)?;
 
-    let expires_in_ms = i64::try_from(token.expires_in().as_millis()).unwrap_or(i64::MAX);
-    let now_ms = Utc::now().timestamp_millis();
     Ok(TwitchTokens {
         access_token: token.access_token.secret().to_owned(),
         refresh_token: token
@@ -193,11 +192,23 @@ fn tokens_from_user_token(token: &UserToken) -> Result<TwitchTokens, AuthError> 
             .as_ref()
             .map(|r| r.secret().to_owned())
             .unwrap_or_default(),
-        expires_at_ms: now_ms.saturating_add(expires_in_ms),
+        expires_at_ms: compute_expires_at_ms(Utc::now().timestamp_millis(), token.expires_in()),
         scopes: token.scopes().iter().map(|s| s.to_string()).collect(),
         user_id,
         login,
     })
+}
+
+/// Overflow-safe absolute expiry timestamp. `Duration::as_millis` returns
+/// `u128`, whose range exceeds `i64`, and the sum `now_ms + expires_in_ms`
+/// can overflow near `i64::MAX`. Both are saturated rather than panicking:
+/// an absurd timestamp is safer than a crash inside the supervisor's hot
+/// path. A saturated value just means `needs_refresh` never fires
+/// proactively, which degrades gracefully to reactive refresh on the next
+/// Twitch 401.
+fn compute_expires_at_ms(now_ms: i64, expires_in: Duration) -> i64 {
+    let expires_in_ms = i64::try_from(expires_in.as_millis()).unwrap_or(i64::MAX);
+    now_ms.saturating_add(expires_in_ms)
 }
 
 /// Post-processes the result of a refresh exchange: persists success,
@@ -322,6 +333,33 @@ mod tests {
             AuthError::OAuth(s) => assert!(s.contains("connection reset")),
             other => panic!("expected OAuth, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn compute_expires_at_ms_happy_path() {
+        let got = compute_expires_at_ms(1_000, Duration::from_secs(3600));
+        assert_eq!(got, 1_000 + 3_600_000);
+    }
+
+    #[test]
+    fn compute_expires_at_ms_zero_duration_returns_now() {
+        let got = compute_expires_at_ms(12_345, Duration::from_secs(0));
+        assert_eq!(got, 12_345);
+    }
+
+    #[test]
+    fn compute_expires_at_ms_saturates_on_duration_overflow() {
+        // Duration::MAX.as_millis() exceeds i64 — try_from falls back to
+        // i64::MAX; then saturating_add clamps the sum to i64::MAX.
+        let got = compute_expires_at_ms(0, Duration::MAX);
+        assert_eq!(got, i64::MAX);
+    }
+
+    #[test]
+    fn compute_expires_at_ms_saturates_on_sum_overflow() {
+        // now_ms already near the ceiling → sum saturates, no panic.
+        let got = compute_expires_at_ms(i64::MAX - 10, Duration::from_secs(3600));
+        assert_eq!(got, i64::MAX);
     }
 
     #[test]
