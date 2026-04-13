@@ -7,9 +7,12 @@
 
 use serde::{Deserialize, Serialize};
 
-/// A persisted Twitch OAuth credential set. One of these per broadcaster
-/// lives as a JSON blob in the keychain under service `prismoid.twitch`
-/// with account `<broadcaster_id>` (see ADR 37).
+/// A persisted Twitch OAuth credential set. Single-account per ADR 30:
+/// one blob per app under service `prismoid.twitch`, account
+/// `KEYCHAIN_ACCOUNT` (see `storage.rs`). `user_id` and `login` are the
+/// authenticated Twitch user's identifiers (from the DCF response) —
+/// carried with the token so the supervisor doesn't need to prompt the
+/// user for their own broadcaster ID.
 ///
 /// `Debug` is hand-rolled to redact token secrets. Any accidental
 /// `tracing::debug!("{tokens:?}")` or similar at a call site must not
@@ -26,6 +29,14 @@ pub struct TwitchTokens {
     /// Scopes granted. Carried so a scope-expansion feature can prompt
     /// re-auth when needed without speculative re-auth on every launch.
     pub scopes: Vec<String>,
+    /// Twitch user_id of the authenticated account, from the DCF
+    /// response. Used as `broadcaster_user_id` in EventSub subscriptions.
+    /// Stable across token refreshes.
+    pub user_id: String,
+    /// Twitch login (handle) of the authenticated account. Used for UI
+    /// display ("Logged in as @<login>") and diagnostic logs. Stable
+    /// across token refreshes.
+    pub login: String,
 }
 
 impl std::fmt::Debug for TwitchTokens {
@@ -35,6 +46,8 @@ impl std::fmt::Debug for TwitchTokens {
             .field("refresh_token", &"[redacted]")
             .field("expires_at_ms", &self.expires_at_ms)
             .field("scopes", &self.scopes)
+            .field("user_id", &self.user_id)
+            .field("login", &self.login)
             .finish()
     }
 }
@@ -59,6 +72,8 @@ mod tests {
             refresh_token: "rt".into(),
             expires_at_ms,
             scopes: vec!["user:read:chat".into()],
+            user_id: "123".into(),
+            login: "someone".into(),
         }
     }
 
@@ -103,6 +118,8 @@ mod tests {
             refresh_token: "super-secret-refresh-xyz".into(),
             expires_at_ms: 1_234_567,
             scopes: vec!["user:read:chat".into()],
+            user_id: "570722168".into(),
+            login: "impulseb23".into(),
         };
         let debug_str = format!("{t:?}");
         assert!(
@@ -117,5 +134,7 @@ mod tests {
         // Non-secret fields still observable for debugging.
         assert!(debug_str.contains("1234567"));
         assert!(debug_str.contains("user:read:chat"));
+        assert!(debug_str.contains("570722168"));
+        assert!(debug_str.contains("impulseb23"));
     }
 }

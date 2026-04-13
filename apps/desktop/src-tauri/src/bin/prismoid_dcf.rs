@@ -2,23 +2,25 @@
 //!
 //! Runs the Device Code Grant flow once, waits for the user to authorize
 //! in their browser, then persists the resulting access + refresh tokens
-//! into the OS keychain (ADR 37). After this runs successfully, the
-//! Tauri app supervisor's [`AuthManager::load_or_refresh`] picks up the
-//! tokens and auto-refreshes them for the full 30-day refresh-token
-//! lifetime without further manual steps.
+//! (plus the authenticated user_id / login) into the OS keychain
+//! (ADR 37). After this runs successfully, the Tauri app supervisor's
+//! [`AuthManager::load_or_refresh`] picks up the tokens and auto-refreshes
+//! them for the full 30-day refresh-token lifetime without further
+//! manual steps.
 //!
 //! Usage:
 //!
 //! ```sh
-//! export PRISMOID_TWITCH_CLIENT_ID=...
-//! export PRISMOID_TWITCH_BROADCASTER_ID=...
 //! cargo run --bin prismoid_dcf
 //! ```
 //!
+//! No env vars required: `client_id` is baked as a compile-time const
+//! (see `twitch_auth::TWITCH_CLIENT_ID`), and the broadcaster identifier
+//! is derived from the DCF response itself.
+//!
 //! The end-user DCF flow lands in a Tauri command + frontend button in
-//! PRI-22; this is a dev-only tool.
+//! PRI-22c; this is a dev-only tool.
 
-use std::env;
 use std::process::Command;
 
 use prismoid_lib::twitch_auth::{AuthManager, KeychainStore, TWITCH_CLIENT_ID};
@@ -26,18 +28,6 @@ use twitch_oauth2::Scope;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // Dev-local .env.local fallback so this bin can be launched directly
-    // from cargo without setting env vars every shell. Matches what
-    // `lib::run` does for the Tauri entry point.
-    #[cfg(debug_assertions)]
-    let _ = dotenvy::from_filename(".env.local");
-
-    // `client_id` is a compile-time const (RFC 8252 public client; see
-    // `twitch_auth::TWITCH_CLIENT_ID`). `broadcaster_id` still comes
-    // from env until PRI-22b derives it from the DCF response.
-    let broadcaster_id = env::var("PRISMOID_TWITCH_BROADCASTER_ID")
-        .map_err(|_| "PRISMOID_TWITCH_BROADCASTER_ID not set")?;
-
     // OAuth HTTP client. Per oauth2-rs docs: disable redirects on the
     // client used for OAuth to avoid SSRF via redirect chains. Same
     // redirect-none pattern the supervisor uses.
@@ -67,10 +57,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .args(["/c", "start", "", details.verification_uri.as_ref()])
         .spawn();
 
-    let tokens = mgr.complete_device_flow(pending, &broadcaster_id).await?;
+    let tokens = mgr.complete_device_flow(pending).await?;
 
     println!();
-    println!("✓ Authorized and persisted to keychain under `prismoid.twitch:{broadcaster_id}`");
+    println!(
+        "✓ Authorized and persisted to keychain — logged in as @{} (user_id {})",
+        tokens.login, tokens.user_id
+    );
     println!(
         "  access_token: [redacted, {} chars]",
         tokens.access_token.len()

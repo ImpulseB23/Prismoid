@@ -8,10 +8,10 @@ use thiserror::Error;
 
 #[derive(Debug, Error)]
 pub enum AuthError {
-    /// No tokens have been persisted for this broadcaster. Supervisor's
-    /// correct response is to kick off the device flow.
-    #[error("no tokens stored for broadcaster {0}")]
-    NoTokens(String),
+    /// No tokens have been persisted. Supervisor's correct response is
+    /// to kick off the device flow (or idle for the frontend to do so).
+    #[error("no tokens stored")]
+    NoTokens,
 
     /// Refresh exchange succeeded with the server but the server said the
     /// refresh token is invalid. Per ADR 31 this surfaces a re-auth UI;
