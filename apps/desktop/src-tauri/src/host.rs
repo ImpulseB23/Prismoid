@@ -106,28 +106,6 @@ pub fn build_twitch_connect_line(creds: &TwitchCreds) -> serde_json::Result<Vec<
     Ok(bytes)
 }
 
-/// Reads Twitch dev credentials from environment variables. Returns None if
-/// any of the four required vars are missing. Phase 0 only, a proper OAuth
-/// flow lands in a follow-up ticket.
-pub fn twitch_creds_from_env() -> Option<TwitchCreds> {
-    twitch_creds_from(|key| std::env::var(key).ok())
-}
-
-/// Source-agnostic version of [`twitch_creds_from_env`]. Takes any closure
-/// that maps an env var name to an optional value, which lets tests exercise
-/// the presence/absence logic without touching process-wide env state.
-fn twitch_creds_from<F>(get: F) -> Option<TwitchCreds>
-where
-    F: Fn(&str) -> Option<String>,
-{
-    Some(TwitchCreds {
-        client_id: get("PRISMOID_TWITCH_CLIENT_ID")?,
-        access_token: get("PRISMOID_TWITCH_ACCESS_TOKEN")?,
-        broadcaster_id: get("PRISMOID_TWITCH_BROADCASTER_ID")?,
-        user_id: get("PRISMOID_TWITCH_USER_ID")?,
-    })
-}
-
 /// Marks a shared memory HANDLE inheritable just before spawning a child
 /// process. See ADR 18 for why this is necessary.
 #[cfg(windows)]
@@ -263,46 +241,6 @@ mod tests {
         parse_batch(std::slice::from_ref(&viewer), &mut batch);
         assert_eq!(batch.len(), 2);
         assert_eq!(batch[1].message_text, "second");
-    }
-
-    #[test]
-    fn twitch_creds_from_returns_some_when_all_present() {
-        let map: std::collections::HashMap<&str, &str> = [
-            ("PRISMOID_TWITCH_CLIENT_ID", "c"),
-            ("PRISMOID_TWITCH_ACCESS_TOKEN", "t"),
-            ("PRISMOID_TWITCH_BROADCASTER_ID", "b"),
-            ("PRISMOID_TWITCH_USER_ID", "u"),
-        ]
-        .into_iter()
-        .collect();
-        let creds =
-            twitch_creds_from(|k| map.get(k).map(|v| v.to_string())).expect("all four present");
-        assert_eq!(creds.client_id, "c");
-        assert_eq!(creds.access_token, "t");
-        assert_eq!(creds.broadcaster_id, "b");
-        assert_eq!(creds.user_id, "u");
-    }
-
-    #[test]
-    fn twitch_creds_from_returns_none_when_any_missing() {
-        // Each iteration leaves exactly one of the four vars unset; the
-        // helper must short-circuit to None in every case.
-        let all = [
-            "PRISMOID_TWITCH_CLIENT_ID",
-            "PRISMOID_TWITCH_ACCESS_TOKEN",
-            "PRISMOID_TWITCH_BROADCASTER_ID",
-            "PRISMOID_TWITCH_USER_ID",
-        ];
-        for missing in all {
-            let got = twitch_creds_from(|k| {
-                if k == missing {
-                    None
-                } else {
-                    Some("v".to_string())
-                }
-            });
-            assert!(got.is_none(), "expected None when {missing} is unset");
-        }
     }
 
     #[cfg(windows)]

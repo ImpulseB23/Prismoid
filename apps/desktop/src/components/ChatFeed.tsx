@@ -51,13 +51,23 @@ const ChatFeed: Component = () => {
   });
 
   onMount(() => {
+    // Capture the unlisten handle into a closure so we can register
+    // onCleanup synchronously inside onMount (Solid's lifecycle only
+    // tracks cleanups registered inside its render/root scope; calling
+    // onCleanup from inside a .then() callback logs the warning
+    // "cleanups created outside a createRoot or render will never be
+    // run" and leaks listeners on HMR/unmount).
+    let unlisten: (() => void) | undefined;
     listen<ChatMessage[]>("chat_messages", (event) => {
       addMessages(event.payload);
     })
-      .then((unlisten) => onCleanup(() => unlisten()))
+      .then((fn) => {
+        unlisten = fn;
+      })
       .catch((err) =>
         console.error("failed to listen for chat messages:", err),
       );
+    onCleanup(() => unlisten?.());
   });
 
   return (

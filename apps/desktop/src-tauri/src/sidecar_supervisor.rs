@@ -34,13 +34,14 @@ use tauri_plugin_shell::{
 #[cfg(windows)]
 use crate::host::{
     build_bootstrap_line, build_twitch_connect_line, mark_handle_inheritable, parse_batch,
-    twitch_creds_from_env, unmark_handle_inheritable, TwitchCreds, SIDECAR_BINARY,
-    SIGNAL_WAIT_TIMEOUT,
+    unmark_handle_inheritable, TwitchCreds, SIDECAR_BINARY, SIGNAL_WAIT_TIMEOUT,
 };
 #[cfg(windows)]
 use crate::message::UnifiedMessage;
 #[cfg(windows)]
 use crate::ringbuf::{RawHandle, RingBufReader, WaitOutcome, DEFAULT_CAPACITY};
+#[cfg(windows)]
+use crate::twitch_auth::{AuthError, AuthManager, KeychainStore};
 
 /// Supervisor timings. Defaults are production values; tests can override.
 #[derive(Debug, Clone)]
@@ -98,13 +99,39 @@ pub fn spawn<R: Runtime>(app: AppHandle<R>) {
 
 #[cfg(windows)]
 async fn supervise<R: Runtime>(app: AppHandle<R>, cfg: SupervisorConfig) {
-    // Credentials are read once at supervisor start. The OAuth + refresh
-    // flow will replace this lookup in a later ticket; until then
-    // .env.local loaded by `lib::run` is the only source.
-    let creds = twitch_creds_from_env();
-    if creds.is_none() {
-        tracing::warn!("PRISMOID_TWITCH_* env vars not all set; launching without auto-connect");
-    }
+    // Non-secret identity config (client_id + broadcaster/user) comes from
+    // env vars. The access + refresh tokens live in the OS keychain,
+    // seeded via `cargo run --bin prismoid_dcf`, rotated automatically
+    // below (ADR 29: refresh 5 min before expiry; ADR 37: Twitch DCF
+    // public client). See PRI-21.
+    let Ok(client_id) = std::env::var("PRISMOID_TWITCH_CLIENT_ID") else {
+        tracing::error!(
+            "PRISMOID_TWITCH_CLIENT_ID not set; supervisor idling. \
+             Set it in .env.local and restart."
+        );
+        return;
+    };
+    let Ok(broadcaster_id) = std::env::var("PRISMOID_TWITCH_BROADCASTER_ID") else {
+        tracing::error!("PRISMOID_TWITCH_BROADCASTER_ID not set; supervisor idling.");
+        return;
+    };
+    // Single-account per platform today (ADR 30): user_id defaults to
+    // broadcaster_id. An explicit env override exists for the edge case
+    // of a mod account watching a different channel.
+    let user_id =
+        std::env::var("PRISMOID_TWITCH_USER_ID").unwrap_or_else(|_| broadcaster_id.clone());
+
+    let http_client = match reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+    {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::error!(error = %e, "failed to build reqwest client; supervisor idling");
+            return;
+        }
+    };
+    let auth = AuthManager::builder(&client_id).build(KeychainStore, http_client);
 
     let mut attempt: u32 = 0;
     let mut backoff = cfg.initial_backoff;
@@ -112,9 +139,42 @@ async fn supervise<R: Runtime>(app: AppHandle<R>, cfg: SupervisorConfig) {
     loop {
         attempt += 1;
         emit_status(&app, "spawning", attempt, None);
-        let started = Instant::now();
 
-        match run_once(&app, attempt, creds.as_ref()).await {
+        // Pull a fresh access token per iteration. Auto-refresh happens
+        // inside load_or_refresh when we're within 5 min of expiry.
+        let tokens = match auth.load_or_refresh(&broadcaster_id).await {
+            Ok(t) => t,
+            Err(AuthError::NoTokens(_)) | Err(AuthError::RefreshTokenInvalid) => {
+                tracing::warn!(
+                    broadcaster = %broadcaster_id,
+                    "no valid Twitch tokens in keychain; run `cargo run --bin prismoid_dcf` to seed"
+                );
+                emit_status(&app, "waiting_for_auth", attempt, None);
+                // Poll the keychain every 30 s so the user can seed
+                // mid-run without a restart. Not a respawn-pressure
+                // scenario, so we stay on a fixed interval rather than
+                // the exponential ladder.
+                tokio::time::sleep(Duration::from_secs(30)).await;
+                continue;
+            }
+            Err(e) => {
+                tracing::error!(error = %e, attempt, "token refresh failed; backing off");
+                emit_status(&app, "backoff", attempt, Some(backoff.as_millis() as u64));
+                tokio::time::sleep(backoff).await;
+                backoff = next_backoff(backoff, &cfg);
+                continue;
+            }
+        };
+
+        let creds = TwitchCreds {
+            client_id: client_id.clone(),
+            access_token: tokens.access_token,
+            broadcaster_id: broadcaster_id.clone(),
+            user_id: user_id.clone(),
+        };
+
+        let started = Instant::now();
+        match run_once(&app, attempt, Some(&creds)).await {
             Ok(()) => tracing::info!(attempt, "sidecar iteration ended"),
             Err(e) => tracing::error!(error = %e, attempt, "sidecar iteration failed"),
         }

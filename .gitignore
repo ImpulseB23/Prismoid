@@ -4,6 +4,10 @@
 
 # Go
 **/bin/
+# Rust crates use `src/bin/` for additional binary targets — un-ignore
+# those so they stay tracked even when under the **/bin/ wildcard.
+!**/src/bin/
+!**/src/bin/**
 
 # Node
 **/node_modules/
