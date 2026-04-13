@@ -1,0 +1,428 @@
+//! Sidecar supervisor: owns the full lifecycle of the Go sidecar child
+//! process. Spawns it, wires up the shared-memory ring, forwards stdout/stderr
+//! to tracing, and respawns on termination with exponential backoff.
+//!
+//! The supervisor runs as a single long-lived tokio task kicked off from
+//! `lib::setup`. Each iteration creates a fresh mapping + event pair
+//! (handles are single-use by design, since the child closes them on exit)
+//! and tears them down when the child dies. Emits `sidecar_status` events
+//! on every state transition so the frontend can react without a second
+//! refactor when UI chrome lands.
+//!
+//! Non-Windows targets are not supported yet; the supervisor is gated
+//! behind `cfg(windows)` and callers fall back to a warn-and-bail in
+//! `lib::setup`.
+
+use std::time::Duration;
+
+use serde::Serialize;
+use tauri::{AppHandle, Emitter, Runtime};
+
+#[cfg(windows)]
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc,
+};
+#[cfg(windows)]
+use std::time::Instant;
+#[cfg(windows)]
+use tauri_plugin_shell::{
+    process::{CommandChild, CommandEvent},
+    ShellExt,
+};
+
+#[cfg(windows)]
+use crate::host::{
+    build_bootstrap_line, build_twitch_connect_line, mark_handle_inheritable, parse_batch,
+    twitch_creds_from_env, unmark_handle_inheritable, TwitchCreds, SIDECAR_BINARY,
+    SIGNAL_WAIT_TIMEOUT,
+};
+#[cfg(windows)]
+use crate::message::UnifiedMessage;
+#[cfg(windows)]
+use crate::ringbuf::{RawHandle, RingBufReader, WaitOutcome, DEFAULT_CAPACITY};
+
+/// Supervisor timings. Defaults are production values; tests can override.
+#[derive(Debug, Clone)]
+pub struct SupervisorConfig {
+    pub initial_backoff: Duration,
+    pub max_backoff: Duration,
+    /// A sidecar run whose uptime reaches this threshold is considered
+    /// healthy, and the backoff resets to `initial_backoff` on its next
+    /// termination. Without this the ladder would only ever ratchet up,
+    /// even if the sidecar was stable for hours between crashes.
+    pub healthy_threshold: Duration,
+}
+
+impl Default for SupervisorConfig {
+    fn default() -> Self {
+        Self {
+            initial_backoff: Duration::from_millis(250),
+            max_backoff: Duration::from_secs(30),
+            healthy_threshold: Duration::from_secs(60),
+        }
+    }
+}
+
+/// Doubles the current backoff, clamped to `cfg.max_backoff`. Pure function
+/// so the exponential ladder can be tested without spinning the runtime.
+pub fn next_backoff(current: Duration, cfg: &SupervisorConfig) -> Duration {
+    let doubled = current.saturating_mul(2);
+    if doubled > cfg.max_backoff {
+        cfg.max_backoff
+    } else {
+        doubled
+    }
+}
+
+/// Emitted to the frontend on every supervisor state transition. The UI
+/// ticket will listen for this; today nothing consumes it, but shipping
+/// the event now means we don't have to touch the supervisor again.
+#[derive(Debug, Clone, Serialize)]
+pub struct SidecarStatus {
+    pub state: &'static str,
+    pub attempt: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub backoff_ms: Option<u64>,
+}
+
+/// Kicks off the supervisor. Returns immediately; the supervisor runs on
+/// a tauri async task until the app exits.
+#[cfg(windows)]
+pub fn spawn<R: Runtime>(app: AppHandle<R>) {
+    let cfg = SupervisorConfig::default();
+    tauri::async_runtime::spawn(async move {
+        supervise(app, cfg).await;
+    });
+}
+
+#[cfg(windows)]
+async fn supervise<R: Runtime>(app: AppHandle<R>, cfg: SupervisorConfig) {
+    // Credentials are read once at supervisor start. The OAuth + refresh
+    // flow will replace this lookup in a later ticket; until then
+    // .env.local loaded by `lib::run` is the only source.
+    let creds = twitch_creds_from_env();
+    if creds.is_none() {
+        tracing::warn!("PRISMOID_TWITCH_* env vars not all set; launching without auto-connect");
+    }
+
+    let mut attempt: u32 = 0;
+    let mut backoff = cfg.initial_backoff;
+
+    loop {
+        attempt += 1;
+        emit_status(&app, "spawning", attempt, None);
+        let started = Instant::now();
+
+        match run_once(&app, attempt, creds.as_ref()).await {
+            Ok(()) => tracing::info!(attempt, "sidecar iteration ended"),
+            Err(e) => tracing::error!(error = %e, attempt, "sidecar iteration failed"),
+        }
+
+        if started.elapsed() >= cfg.healthy_threshold {
+            backoff = cfg.initial_backoff;
+            tracing::info!("sidecar run was healthy, backoff reset");
+        }
+
+        emit_status(&app, "backoff", attempt, Some(backoff.as_millis() as u64));
+        tokio::time::sleep(backoff).await;
+        backoff = next_backoff(backoff, &cfg);
+    }
+}
+
+/// RAII wrapper that kills the wrapped sidecar on drop unless [`release`]
+/// is called first. Used in [`run_once`] to avoid leaking children when a
+/// post-spawn step (bootstrap serialize, stdin write, etc.) returns early
+/// with `?`.
+///
+/// [`release`]: ChildGuard::release
+#[cfg(windows)]
+struct ChildGuard {
+    inner: Option<CommandChild>,
+}
+
+#[cfg(windows)]
+impl ChildGuard {
+    fn new(child: CommandChild) -> Self {
+        Self { inner: Some(child) }
+    }
+
+    /// Disarms the kill-on-drop and returns the wrapped child. Call this
+    /// once the [`CommandEvent`] stream has taken over the child's
+    /// lifecycle — every subsequent termination flows through
+    /// [`CommandEvent::Terminated`], so an explicit kill is redundant.
+    fn release(mut self) -> CommandChild {
+        self.inner.take().expect("release called at most once")
+    }
+}
+
+#[cfg(windows)]
+impl std::ops::Deref for ChildGuard {
+    type Target = CommandChild;
+    fn deref(&self) -> &CommandChild {
+        self.inner.as_ref().expect("child still owned by guard")
+    }
+}
+
+#[cfg(windows)]
+impl std::ops::DerefMut for ChildGuard {
+    fn deref_mut(&mut self) -> &mut CommandChild {
+        self.inner.as_mut().expect("child still owned by guard")
+    }
+}
+
+#[cfg(windows)]
+impl Drop for ChildGuard {
+    fn drop(&mut self) {
+        if let Some(child) = self.inner.take() {
+            if let Err(e) = child.kill() {
+                tracing::error!(error = %e, "failed to kill sidecar on error path");
+            }
+        }
+    }
+}
+
+#[cfg(windows)]
+async fn run_once<R: Runtime>(
+    app: &AppHandle<R>,
+    attempt: u32,
+    creds: Option<&TwitchCreds>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let reader = RingBufReader::create_owner(DEFAULT_CAPACITY)?;
+    let handle = reader.raw_handle();
+    let event_handle = reader
+        .raw_event_handle()
+        .expect("owner-created reader has event handle");
+    let size = reader.map_size();
+
+    mark_handle_inheritable(handle)?;
+    if let Err(e) = mark_handle_inheritable(event_handle) {
+        if let Err(undo) = unmark_handle_inheritable(handle) {
+            tracing::error!(error = %undo, "failed to undo mapping mark after event mark failure");
+        }
+        return Err(e.into());
+    }
+
+    // RAII guard: clears the inheritable flag on both handles when dropped,
+    // including on any unwinding error path between mark and explicit drop.
+    // See ADR 18 and the Rust stdlib `CREATE_PROCESS_LOCK` comment for why
+    // the window matters.
+    struct InheritGuard {
+        mapping: RawHandle,
+        event: RawHandle,
+    }
+    impl Drop for InheritGuard {
+        fn drop(&mut self) {
+            if let Err(e) = unmark_handle_inheritable(self.mapping) {
+                tracing::error!(error = %e, "failed to un-mark mapping inheritance");
+            }
+            if let Err(e) = unmark_handle_inheritable(self.event) {
+                tracing::error!(error = %e, "failed to un-mark event inheritance");
+            }
+        }
+    }
+    let inherit_guard = InheritGuard {
+        mapping: handle,
+        event: event_handle,
+    };
+
+    let (mut rx, child) = app.shell().sidecar(SIDECAR_BINARY)?.spawn()?;
+    // Spawn succeeded; child has inherited both handles. Clear the flags
+    // now, not at scope exit, so any process we happen to spawn between
+    // here and termination does not inherit the shared-memory handle.
+    drop(inherit_guard);
+
+    // Wrap the child so any `?` return between here and the event loop
+    // kills it instead of leaking a zombie across respawn iterations.
+    let mut child = ChildGuard::new(child);
+
+    let bootstrap_line = build_bootstrap_line(handle, event_handle, size)?;
+    child.write(&bootstrap_line)?;
+    tracing::info!(attempt, "sidecar bootstrap written");
+
+    if let Some(creds) = creds {
+        let connect_line = build_twitch_connect_line(creds)?;
+        child.write(&connect_line)?;
+        tracing::info!(attempt, broadcaster = %creds.broadcaster_id, "sent twitch_connect");
+    }
+
+    // Disarm the kill-on-drop: the CommandEvent stream now owns the
+    // child's lifecycle. Hold the released CommandChild in `_child` for
+    // the rest of the function so its stdin stays open for the duration
+    // of the session (dropping it mid-session would close stdin and
+    // strand the control protocol).
+    let _child = child.release();
+
+    let shutdown = Arc::new(AtomicBool::new(false));
+    let drain_shutdown = shutdown.clone();
+    let drain_app = app.clone();
+    let drain_handle = tauri::async_runtime::spawn_blocking(move || {
+        run_drain_loop(reader, drain_app, drain_shutdown);
+    });
+
+    emit_status(app, "running", attempt, None);
+
+    while let Some(event) = rx.recv().await {
+        match event {
+            CommandEvent::Stdout(bytes) => {
+                tracing::debug!(line = %String::from_utf8_lossy(&bytes), "sidecar stdout");
+            }
+            CommandEvent::Stderr(bytes) => {
+                tracing::debug!(line = %String::from_utf8_lossy(&bytes), "sidecar stderr");
+            }
+            CommandEvent::Error(msg) => {
+                // Transient stream error; the child may still be alive.
+                // Log and keep reading until we see Terminated (or the
+                // stream closes on its own).
+                tracing::error!(error = %msg, attempt, "sidecar command stream error");
+            }
+            CommandEvent::Terminated(payload) => {
+                tracing::warn!(code = ?payload.code, attempt, "sidecar terminated");
+                break;
+            }
+            // `CommandEvent` is `#[non_exhaustive]` upstream. Any future
+            // variant should at least surface at trace level instead of
+            // silently disappearing.
+            _ => {
+                tracing::trace!(attempt, "unhandled sidecar command event variant");
+            }
+        }
+    }
+
+    // Release-store the shutdown flag; the drain loop does an Acquire-load
+    // at the top of every iteration and exits after one final drain pass
+    // so no pending messages are dropped on the floor.
+    shutdown.store(true, Ordering::Release);
+    if let Err(e) = drain_handle.await {
+        tracing::error!(error = %e, "drain task join failed");
+    }
+
+    emit_status(app, "terminated", attempt, None);
+    Ok(())
+}
+
+#[cfg(windows)]
+fn run_drain_loop<R: Runtime>(
+    mut reader: RingBufReader,
+    app: AppHandle<R>,
+    shutdown: Arc<AtomicBool>,
+) {
+    let timeout_ms: u32 = SIGNAL_WAIT_TIMEOUT
+        .as_millis()
+        .try_into()
+        .expect("signal wait timeout fits in u32 ms");
+    let mut batch: Vec<UnifiedMessage> = Vec::with_capacity(64);
+
+    loop {
+        if shutdown.load(Ordering::Acquire) {
+            drain_and_emit(&mut reader, &app, &mut batch);
+            return;
+        }
+        match reader.wait_for_signal(timeout_ms) {
+            Ok(WaitOutcome::Signaled) | Ok(WaitOutcome::TimedOut) => {}
+            Err(e) => {
+                tracing::error!(error = %e, "wait_for_signal failed, drain loop exiting");
+                return;
+            }
+        }
+        drain_and_emit(&mut reader, &app, &mut batch);
+    }
+}
+
+#[cfg(windows)]
+fn drain_and_emit<R: Runtime>(
+    reader: &mut RingBufReader,
+    app: &AppHandle<R>,
+    batch: &mut Vec<UnifiedMessage>,
+) {
+    let raw = reader.drain();
+    if raw.is_empty() {
+        return;
+    }
+    batch.clear();
+    parse_batch(&raw, batch);
+    if batch.is_empty() {
+        return;
+    }
+    if let Err(e) = app.emit("chat_messages", &*batch) {
+        tracing::error!(error = %e, "failed to emit chat_messages");
+    }
+}
+
+fn emit_status<R: Runtime>(
+    app: &AppHandle<R>,
+    state: &'static str,
+    attempt: u32,
+    backoff_ms: Option<u64>,
+) {
+    let status = SidecarStatus {
+        state,
+        attempt,
+        backoff_ms,
+    };
+    if let Err(e) = app.emit("sidecar_status", &status) {
+        tracing::warn!(error = %e, state, "failed to emit sidecar_status");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_config_matches_spec() {
+        let cfg = SupervisorConfig::default();
+        assert_eq!(cfg.initial_backoff, Duration::from_millis(250));
+        assert_eq!(cfg.max_backoff, Duration::from_secs(30));
+        assert_eq!(cfg.healthy_threshold, Duration::from_secs(60));
+    }
+
+    #[test]
+    fn backoff_doubles_until_max() {
+        let cfg = SupervisorConfig::default();
+        let ladder = [
+            (Duration::from_millis(250), Duration::from_millis(500)),
+            (Duration::from_millis(500), Duration::from_secs(1)),
+            (Duration::from_secs(1), Duration::from_secs(2)),
+            (Duration::from_secs(2), Duration::from_secs(4)),
+            (Duration::from_secs(4), Duration::from_secs(8)),
+            (Duration::from_secs(8), Duration::from_secs(16)),
+            (Duration::from_secs(16), Duration::from_secs(30)),
+            (Duration::from_secs(30), Duration::from_secs(30)),
+        ];
+        for (input, expected) in ladder {
+            assert_eq!(next_backoff(input, &cfg), expected, "input {input:?}");
+        }
+    }
+
+    #[test]
+    fn backoff_saturates_on_huge_input() {
+        let cfg = SupervisorConfig::default();
+        assert_eq!(next_backoff(Duration::MAX, &cfg), cfg.max_backoff);
+    }
+
+    #[test]
+    fn sidecar_status_serializes_without_backoff_ms_when_none() {
+        let status = SidecarStatus {
+            state: "running",
+            attempt: 3,
+            backoff_ms: None,
+        };
+        let v: serde_json::Value = serde_json::to_value(&status).unwrap();
+        assert_eq!(v["state"], "running");
+        assert_eq!(v["attempt"], 3);
+        assert!(v.get("backoff_ms").is_none());
+    }
+
+    #[test]
+    fn sidecar_status_serializes_backoff_ms_when_some() {
+        let status = SidecarStatus {
+            state: "backoff",
+            attempt: 7,
+            backoff_ms: Some(4000),
+        };
+        let v: serde_json::Value = serde_json::to_value(&status).unwrap();
+        assert_eq!(v["state"], "backoff");
+        assert_eq!(v["backoff_ms"], 4000);
+    }
+}
