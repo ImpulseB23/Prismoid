@@ -104,19 +104,7 @@ impl AuthManager {
             return Ok(stored);
         }
 
-        match self.refresh_tokens(&stored).await {
-            Ok(refreshed) => {
-                self.store.save(&refreshed)?;
-                Ok(refreshed)
-            }
-            Err(AuthError::RefreshTokenInvalid) => {
-                // Swallow the delete error: the caller cares about the
-                // auth failure, not a keychain cleanup hiccup.
-                let _ = self.store.delete();
-                Err(AuthError::RefreshTokenInvalid)
-            }
-            Err(e) => Err(e),
-        }
+        handle_refresh_result(self.refresh_tokens(&stored).await, self.store.as_ref())
     }
 
     /// Requests a device code from Twitch. The returned response has
@@ -210,6 +198,34 @@ fn tokens_from_user_token(token: &UserToken) -> Result<TwitchTokens, AuthError> 
         user_id,
         login,
     })
+}
+
+/// Post-processes the result of a refresh exchange: persists success,
+/// wipes stored tokens on `RefreshTokenInvalid` (so the supervisor's
+/// 30-second retry loop doesn't hammer Twitch's refresh endpoint with
+/// a known-dead token every tick), propagates other errors unchanged.
+///
+/// Extracted as a pure function over `&dyn TokenStore` so the behavior
+/// is testable without mocking the HTTP refresh itself (the
+/// `twitch_oauth2` side of that is covered manually via the
+/// `prismoid_dcf` E2E, with a proper mock harness tracked in PRI-14).
+fn handle_refresh_result(
+    result: Result<TwitchTokens, AuthError>,
+    store: &dyn TokenStore,
+) -> Result<TwitchTokens, AuthError> {
+    match result {
+        Ok(refreshed) => {
+            store.save(&refreshed)?;
+            Ok(refreshed)
+        }
+        Err(AuthError::RefreshTokenInvalid) => {
+            // Swallow the delete error: the caller cares about the
+            // auth failure, not a keychain cleanup hiccup.
+            let _ = store.delete();
+            Err(AuthError::RefreshTokenInvalid)
+        }
+        Err(e) => Err(e),
+    }
 }
 
 /// Rejects a half-initialized identity. `UserToken.user_id` / `login`
@@ -335,6 +351,59 @@ mod tests {
             Err(AuthError::OAuth(_)) => {}
             other => panic!("expected OAuth, got {other:?}"),
         }
+    }
+
+    fn sample_tokens() -> TwitchTokens {
+        TwitchTokens {
+            access_token: "at-new".into(),
+            refresh_token: "rt-new".into(),
+            expires_at_ms: 1_000_000,
+            scopes: vec!["user:read:chat".into()],
+            user_id: "570722168".into(),
+            login: "impulseb23".into(),
+        }
+    }
+
+    #[test]
+    fn handle_refresh_result_persists_on_success() {
+        let store = MemoryStore::default();
+        let fresh = sample_tokens();
+        let got = handle_refresh_result(Ok(fresh.clone()), &store).unwrap();
+        assert_eq!(got, fresh);
+        assert_eq!(
+            store.load().unwrap().unwrap(),
+            fresh,
+            "refreshed tokens must land in the store"
+        );
+    }
+
+    #[test]
+    fn handle_refresh_result_deletes_on_refresh_token_invalid() {
+        let store = MemoryStore::default();
+        // Seed the store with stale tokens the caller is trying to refresh.
+        store.save(&sample_tokens()).unwrap();
+        assert!(store.load().unwrap().is_some());
+
+        let err = handle_refresh_result(Err(AuthError::RefreshTokenInvalid), &store).unwrap_err();
+        assert!(matches!(err, AuthError::RefreshTokenInvalid));
+        assert!(
+            store.load().unwrap().is_none(),
+            "stale tokens must be evicted so the supervisor doesn't retry against them"
+        );
+    }
+
+    #[test]
+    fn handle_refresh_result_propagates_other_errors_without_touching_store() {
+        let store = MemoryStore::default();
+        store.save(&sample_tokens()).unwrap();
+
+        let err =
+            handle_refresh_result(Err(AuthError::OAuth("network".into())), &store).unwrap_err();
+        assert!(matches!(err, AuthError::OAuth(_)));
+        assert!(
+            store.load().unwrap().is_some(),
+            "transient errors must not evict tokens — refresh might succeed next tick"
+        );
     }
 
     #[tokio::test]
