@@ -2,6 +2,7 @@ mod host;
 mod message;
 pub mod ringbuf;
 mod sidecar_supervisor;
+pub mod twitch_auth;
 
 // Re-exports for the bench harness. Gated so the public crate surface
 // does not grow with bench-only plumbing in release builds.
