@@ -15,9 +15,9 @@ use aho_corasick::{AhoCorasick, AhoCorasickBuilder, MatchKind};
 use arc_swap::ArcSwap;
 use rustc_hash::FxHashMap;
 use serde::{Deserialize, Serialize};
+use tracing::warn;
 
-/// Emote provider. Mirrors `sidecar/internal/emotes.Provider` with a `u8`
-/// tag so callers can pack it into message payloads cheaply.
+/// Emote provider. Mirrors `sidecar/internal/emotes.Provider`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Provider {
@@ -34,7 +34,9 @@ pub enum Provider {
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub struct EmoteMeta {
     pub id: Box<str>,
-    pub code: Box<str>,
+    /// Emote code (what users type). Stored as `Arc<str>` so the index can
+    /// share a single allocation between the lookup map key and the meta.
+    pub code: Arc<str>,
     pub provider: Provider,
     #[serde(rename = "url_1x")]
     pub url_1x: Box<str>,
@@ -66,12 +68,12 @@ pub struct EmoteSpan {
 /// pointed at by the atomic swap; readers keep the snapshot alive for the
 /// duration of their scan regardless of subsequent rebuilds.
 struct Snapshot {
-    by_code: FxHashMap<Box<str>, Arc<EmoteMeta>>,
+    by_code: FxHashMap<Arc<str>, Arc<EmoteMeta>>,
     /// aho-corasick pattern i resolves to `patterns[i]`. Kept parallel so
     /// the automaton output carries zero per-match metadata.
     patterns: Vec<Arc<EmoteMeta>>,
-    /// `None` when there are zero emotes — `AhoCorasickBuilder::build` errors
-    /// on empty inputs and we never want to allocate one in that case.
+    /// `None` when there are zero emotes, or when the builder rejected the
+    /// input (all codes filtered out as invalid).
     ac: Option<AhoCorasick>,
 }
 
@@ -85,8 +87,8 @@ impl Snapshot {
     }
 }
 
-/// Lock-free emote index. Cheap to clone via [`Arc`]; one instance per
-/// active channel.
+/// Lock-free emote index. Wrap in [`Arc<EmoteIndex>`] when callers need
+/// cheap shared ownership; typically one instance per active channel.
 pub struct EmoteIndex {
     inner: ArcSwap<Snapshot>,
 }
@@ -102,10 +104,16 @@ impl EmoteIndex {
     /// codes are resolved by "later wins" — callers that care about
     /// precedence (channel > global, or 7TV > BTTV > FFZ) pass entries in
     /// ascending priority order so the highest-priority source overwrites.
+    ///
+    /// Emotes with empty codes are dropped (aho-corasick rejects them and
+    /// they would never match anyway).
     pub fn load<I: IntoIterator<Item = EmoteMeta>>(&self, emotes: I) {
-        let mut by_code: FxHashMap<Box<str>, Arc<EmoteMeta>> = FxHashMap::default();
+        let mut by_code: FxHashMap<Arc<str>, Arc<EmoteMeta>> = FxHashMap::default();
         for e in emotes {
-            let code = e.code.clone();
+            if e.code.is_empty() {
+                continue;
+            }
+            let code = Arc::clone(&e.code);
             by_code.insert(code, Arc::new(e));
         }
 
@@ -122,12 +130,16 @@ impl EmoteIndex {
         let ac = if needles.is_empty() {
             None
         } else {
-            Some(
-                AhoCorasickBuilder::new()
-                    .match_kind(MatchKind::LeftmostLongest)
-                    .build(&needles)
-                    .expect("aho-corasick build with non-empty inputs cannot fail"),
-            )
+            match AhoCorasickBuilder::new()
+                .match_kind(MatchKind::LeftmostLongest)
+                .build(&needles)
+            {
+                Ok(ac) => Some(ac),
+                Err(err) => {
+                    warn!(error = %err, count = needles.len(), "emote_index: aho-corasick build failed; scans will no-op until next reload");
+                    None
+                }
+            }
         };
 
         self.inner.store(Arc::new(Snapshot {
@@ -160,7 +172,14 @@ impl EmoteIndex {
     /// by ASCII whitespace or the ends of `text` — this mirrors how Twitch
     /// chat tokenizes, and prevents `Kappa` inside `KappaPride` (if only
     /// `Kappa` is indexed) from matching as a substring.
+    ///
+    /// Texts longer than `u32::MAX` bytes are not scanned; chat messages
+    /// are capped far below that in practice, so this only guards against
+    /// corrupt input.
     pub fn scan_into(&self, text: &str, out: &mut Vec<EmoteSpan>) {
+        if text.len() > u32::MAX as usize {
+            return;
+        }
         let snap = self.inner.load();
         let Some(ac) = snap.ac.as_ref() else {
             return;
@@ -188,12 +207,13 @@ impl Default for EmoteIndex {
     }
 }
 
-/// Returns true when `start..end` is surrounded by ASCII whitespace or sits
-/// at a string boundary. Emote codes never contain spaces, so whitespace is
-/// the only valid delimiter across Twitch, 7TV, BTTV, and FFZ.
+/// Returns true when `start..end` is surrounded by ASCII whitespace (space,
+/// tab, newline, carriage return, form feed) or sits at a string boundary.
+/// Emote codes never contain whitespace, so whitespace is the only valid
+/// delimiter across Twitch, 7TV, BTTV, and FFZ.
 fn is_token_boundary(bytes: &[u8], start: usize, end: usize) -> bool {
-    let left_ok = start == 0 || bytes[start - 1] == b' ';
-    let right_ok = end == bytes.len() || bytes[end] == b' ';
+    let left_ok = start == 0 || bytes[start - 1].is_ascii_whitespace();
+    let right_ok = end == bytes.len() || bytes[end].is_ascii_whitespace();
     left_ok && right_ok
 }
 
@@ -336,6 +356,36 @@ mod tests {
         idx.scan_into("Kappa", &mut out);
         assert_eq!(out.len(), 1);
         assert!(out.capacity() >= cap_before);
+    }
+
+    #[test]
+    fn tab_and_newline_are_boundaries() {
+        let idx = EmoteIndex::new();
+        idx.load([meta("Kappa", Provider::Twitch)]);
+
+        let mut out = Vec::new();
+        idx.scan_into("hi\tKappa\nbye", &mut out);
+        assert_eq!(out.len(), 1, "tab+newline should delimit emotes");
+        assert_eq!(out[0].start, 3);
+        assert_eq!(out[0].end, 8);
+    }
+
+    #[test]
+    fn empty_code_is_dropped() {
+        let idx = EmoteIndex::new();
+        idx.load([meta("", Provider::Twitch), meta("Kappa", Provider::Twitch)]);
+        assert_eq!(idx.len(), 1);
+        assert!(idx.lookup("Kappa").is_some());
+    }
+
+    #[test]
+    fn only_empty_codes_leaves_index_usable() {
+        let idx = EmoteIndex::new();
+        idx.load([meta("", Provider::Twitch)]);
+        assert!(idx.is_empty());
+        let mut out = Vec::new();
+        idx.scan_into("hello world", &mut out);
+        assert!(out.is_empty());
     }
 
     #[test]
