@@ -17,6 +17,7 @@
     "prepare": "test -d .git && lefthook install --force || echo 'skipping lefthook (not a git repo)'"
   },
   "dependencies": {
+    "@chenglou/pretext": "^0.0.5",
     "@tauri-apps/api": "^2.10.1",
     "@tauri-apps/plugin-shell": "^2.3.5",
     "solid-js": "^1.9.12"
