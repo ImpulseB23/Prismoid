@@ -4,6 +4,25 @@
 
 import { createSignal } from "solid-js";
 
+export interface EmoteMeta {
+  id: string;
+  code: string;
+  provider: "twitch" | "7tv" | "bttv" | "ffz";
+  url_1x: string;
+  url_2x: string;
+  url_4x: string;
+  width: number;
+  height: number;
+  animated: boolean;
+  zero_width: boolean;
+}
+
+export interface EmoteSpan {
+  start: number;
+  end: number;
+  emote: EmoteMeta;
+}
+
 export interface ChatMessage {
   id: string;
   platform: "Twitch" | "YouTube" | "Kick";
@@ -19,6 +38,7 @@ export interface ChatMessage {
   is_broadcaster: boolean;
   color: string | null;
   reply_to: string | null;
+  emote_spans: EmoteSpan[];
 }
 
 export interface Viewport {

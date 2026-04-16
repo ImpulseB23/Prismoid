@@ -304,20 +304,21 @@ async fn run_once<R: Runtime>(
     // strand the control protocol).
     let _child = child.release();
 
+    // EmoteIndex lives for the lifetime of this sidecar run; a fresh one is
+    // built on every respawn. Shared by the control-plane reader (which
+    // swaps in fresh bundles on `emote_bundle`) and the drain loop (which
+    // scans each parsed message against the current snapshot).
+    let emote_index: Arc<EmoteIndex> = Arc::new(EmoteIndex::new());
+
     let shutdown = Arc::new(AtomicBool::new(false));
     let drain_shutdown = shutdown.clone();
     let drain_app = app.clone();
+    let drain_index = emote_index.clone();
     let drain_handle = tauri::async_runtime::spawn_blocking(move || {
-        run_drain_loop(reader, drain_app, drain_shutdown);
+        run_drain_loop(reader, drain_app, drain_shutdown, drain_index);
     });
 
     emit_status(app, "running", attempt, None);
-
-    // EmoteIndex lives for the lifetime of this sidecar run; a fresh one is
-    // built on every respawn. Not yet consumed on the message hot path
-    // (follow-up) but held here so `emote_bundle` messages have a stable
-    // target while the frontend already receives the bundle for rendering.
-    let emote_index: Arc<EmoteIndex> = Arc::new(EmoteIndex::new());
 
     while let Some(event) = rx.recv().await {
         match event {
@@ -363,6 +364,7 @@ fn run_drain_loop<R: Runtime>(
     mut reader: RingBufReader,
     app: AppHandle<R>,
     shutdown: Arc<AtomicBool>,
+    emote_index: Arc<EmoteIndex>,
 ) {
     let timeout_ms: u32 = SIGNAL_WAIT_TIMEOUT
         .as_millis()
@@ -372,7 +374,7 @@ fn run_drain_loop<R: Runtime>(
 
     loop {
         if shutdown.load(Ordering::Acquire) {
-            drain_and_emit(&mut reader, &app, &mut batch);
+            drain_and_emit(&mut reader, &app, &mut batch, &emote_index);
             return;
         }
         match reader.wait_for_signal(timeout_ms) {
@@ -382,7 +384,7 @@ fn run_drain_loop<R: Runtime>(
                 return;
             }
         }
-        drain_and_emit(&mut reader, &app, &mut batch);
+        drain_and_emit(&mut reader, &app, &mut batch, &emote_index);
     }
 }
 
@@ -391,13 +393,14 @@ fn drain_and_emit<R: Runtime>(
     reader: &mut RingBufReader,
     app: &AppHandle<R>,
     batch: &mut Vec<UnifiedMessage>,
+    emote_index: &EmoteIndex,
 ) {
     let raw = reader.drain();
     if raw.is_empty() {
         return;
     }
     batch.clear();
-    parse_batch(&raw, batch);
+    parse_batch(&raw, batch, emote_index);
     if batch.is_empty() {
         return;
     }

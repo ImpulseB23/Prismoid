@@ -19,6 +19,7 @@ use criterion::{
     black_box, criterion_group, criterion_main, BatchSize, BenchmarkId, Criterion, Throughput,
 };
 
+use prismoid_lib::emote_index::EmoteIndex;
 use prismoid_lib::ringbuf::RingBufReader;
 use prismoid_lib::{parse_batch, UnifiedMessage};
 
@@ -112,6 +113,7 @@ fn drain_only(c: &mut Criterion) {
 
 fn parse_only(c: &mut Criterion) {
     let mut group = c.benchmark_group("parse_only");
+    let idx = EmoteIndex::new();
     for &n in SWEEP_SIZES {
         let raw: Vec<Vec<u8>> = (0..n).map(|_| TWITCH_MESSAGE.to_vec()).collect();
         let mut batch: Vec<UnifiedMessage> = Vec::with_capacity(n as usize);
@@ -119,7 +121,7 @@ fn parse_only(c: &mut Criterion) {
         group.bench_with_input(BenchmarkId::from_parameter(n), &raw, |b, raw| {
             b.iter(|| {
                 batch.clear();
-                parse_batch(raw, &mut batch);
+                parse_batch(raw, &mut batch, &idx);
                 black_box(&batch);
             });
         });
@@ -129,6 +131,7 @@ fn parse_only(c: &mut Criterion) {
 
 fn drain_and_parse(c: &mut Criterion) {
     let mut group = c.benchmark_group("drain_and_parse");
+    let idx = EmoteIndex::new();
     for &n in SWEEP_SIZES {
         let mut batch: Vec<UnifiedMessage> = Vec::with_capacity(n as usize);
         group.throughput(Throughput::Elements(n as u64));
@@ -144,7 +147,7 @@ fn drain_and_parse(c: &mut Criterion) {
                 |reader| {
                     batch.clear();
                     let raw = reader.drain();
-                    parse_batch(&raw, &mut batch);
+                    parse_batch(&raw, &mut batch, &idx);
                     black_box(&batch);
                 },
                 BatchSize::SmallInput,
