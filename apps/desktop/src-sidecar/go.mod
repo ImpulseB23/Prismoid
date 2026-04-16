@@ -5,7 +5,7 @@ go 1.26
 require (
 	github.com/coder/websocket v1.8.14
 	github.com/rs/zerolog v1.35.0
-	golang.org/x/sys v0.29.0
+	golang.org/x/sys v0.43.0
 )
 
 require (
