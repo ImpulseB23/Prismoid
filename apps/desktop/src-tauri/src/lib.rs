@@ -4,6 +4,8 @@ pub mod ringbuf;
 mod sidecar_supervisor;
 pub mod twitch_auth;
 
+pub mod emote_index;
+
 // Re-exports for the bench harness. Gated so the public crate surface
 // does not grow with bench-only plumbing in release builds.
 #[cfg(any(test, feature = "__bench"))]
