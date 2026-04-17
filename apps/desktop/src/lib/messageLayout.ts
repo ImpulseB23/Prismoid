@@ -6,8 +6,11 @@ import {
   measureRichInlineStats,
   prepareRichInline,
   type PreparedRichInline,
+  type RichInlineItem,
 } from "@chenglou/pretext/rich-inline";
+import { measureNaturalWidth, prepareWithSegments } from "@chenglou/pretext";
 import type { ChatMessage } from "../stores/chatStore";
+import { splitMessage, type MessagePiece } from "./emoteSpans";
 
 // Named families only. `system-ui` is unsafe for pretext accuracy on macOS.
 // Exported so `ChatFeed.tsx` applies the exact same stack that Pretext
@@ -27,16 +30,51 @@ export const MESSAGE_PADDING_Y = 4;
 // overflow will never wrap and measured heights will be too small.
 export const MESSAGE_PADDING_X = 8;
 
-export function prepareMessage(msg: ChatMessage): PreparedRichInline {
-  return prepareRichInline([
-    {
-      text: msg.display_name,
-      font: USERNAME_FONT,
-      break: "never",
-    },
+// NBSP is not collapsed by Pretext's boundary-whitespace rules, so it
+// survives as a measurable placeholder. Each emote becomes an atomic
+// (`break: "never"`) item whose total width equals the NBSP natural
+// width plus `extraWidth`, sized to match the rendered <img>.
+const EMOTE_PLACEHOLDER = "\u00A0";
+
+const placeholderWidthCache = new Map<string, number>();
+function placeholderWidth(font: string): number {
+  const cached = placeholderWidthCache.get(font);
+  if (cached !== undefined) return cached;
+  const w = measureNaturalWidth(prepareWithSegments(EMOTE_PLACEHOLDER, font));
+  placeholderWidthCache.set(font, w);
+  return w;
+}
+
+export interface PreparedMessage {
+  prepared: PreparedRichInline;
+  pieces: MessagePiece[];
+}
+
+export function prepareMessage(msg: ChatMessage): PreparedMessage {
+  const pieces = splitMessage(msg.message_text, msg.emote_spans, {
+    maxHeight: MESSAGE_LINE_HEIGHT,
+  });
+
+  const items: RichInlineItem[] = [
+    { text: msg.display_name, font: USERNAME_FONT, break: "never" },
     { text: ": ", font: SEPARATOR_FONT },
-    { text: msg.message_text, font: TEXT_FONT },
-  ]);
+  ];
+
+  const placeholder = placeholderWidth(TEXT_FONT);
+  for (const piece of pieces) {
+    if (piece.kind === "text") {
+      items.push({ text: piece.text, font: TEXT_FONT });
+    } else {
+      items.push({
+        text: EMOTE_PLACEHOLDER,
+        font: TEXT_FONT,
+        break: "never",
+        extraWidth: Math.max(0, piece.primary.width - placeholder),
+      });
+    }
+  }
+
+  return { prepared: prepareRichInline(items), pieces };
 }
 
 export function measureMessageHeight(

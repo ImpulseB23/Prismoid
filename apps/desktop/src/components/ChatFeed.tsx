@@ -14,7 +14,6 @@ import {
   onMount,
 } from "solid-js";
 import { listen } from "@tauri-apps/api/event";
-import type { PreparedRichInline } from "@chenglou/pretext/rich-inline";
 import {
   addMessages,
   getMessage,
@@ -29,22 +28,70 @@ import {
   MESSAGE_PADDING_Y,
   measureMessageHeight,
   prepareMessage,
+  type PreparedMessage,
 } from "../lib/messageLayout";
+import type { MessagePiece } from "../lib/emoteSpans";
 
 const OVERSCAN = 6;
 const STICK_THRESHOLD = 40;
 
+function renderPiece(piece: MessagePiece) {
+  if (piece.kind === "text") {
+    return <span>{piece.text}</span>;
+  }
+  const { primary, overlays } = piece;
+  return (
+    <span
+      style={{
+        display: "inline-block",
+        position: "relative",
+        width: `${primary.width}px`,
+        height: `${primary.height}px`,
+        "vertical-align": "middle",
+      }}
+    >
+      <img
+        src={primary.emote.url_1x}
+        alt={primary.emote.code}
+        title={primary.emote.code}
+        width={primary.width}
+        height={primary.height}
+        draggable={false}
+        style={{ display: "block" }}
+      />
+      <For each={overlays}>
+        {(overlay) => (
+          <img
+            src={overlay.emote.url_1x}
+            alt={overlay.emote.code}
+            title={overlay.emote.code}
+            width={overlay.width}
+            height={overlay.height}
+            draggable={false}
+            style={{
+              position: "absolute",
+              left: `${(primary.width - overlay.width) / 2}px`,
+              top: `${(primary.height - overlay.height) / 2}px`,
+              "pointer-events": "none",
+            }}
+          />
+        )}
+      </For>
+    </span>
+  );
+}
+
 interface PositionedMessage {
   monoIndex: number;
   msg: ChatMessage;
-  prepared: PreparedRichInline;
+  prepared: PreparedMessage;
   top: number;
   height: number;
 }
 
 const ChatFeed: Component = () => {
   let containerRef: HTMLDivElement | undefined;
-  const preparedCache = new Map<number, PreparedRichInline>();
+  const preparedCache = new Map<number, PreparedMessage>();
 
   const [width, setWidth] = createSignal(0);
   const [viewportHeight, setViewportHeight] = createSignal(0);
@@ -97,7 +144,7 @@ const ChatFeed: Component = () => {
         prepared = prepareMessage(msg);
         preparedCache.set(mono, prepared);
       }
-      const height = measureMessageHeight(prepared, w);
+      const height = measureMessageHeight(prepared.prepared, w);
       messages[writeIdx++] = { monoIndex: mono, msg, prepared, top: y, height };
       y += height;
     }
@@ -244,7 +291,9 @@ const ChatFeed: Component = () => {
                 {item.msg.display_name}
               </span>
               <span style={{ color: "#adadb8" }}>: </span>
-              <span>{item.msg.message_text}</span>
+              <For each={item.prepared.pieces}>
+                {(piece) => renderPiece(piece)}
+              </For>
             </div>
           )}
         </For>
