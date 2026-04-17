@@ -17,6 +17,7 @@ function makeMsg(id: string, text = `msg ${id}`): ChatMessage {
     is_broadcaster: false,
     color: null,
     reply_to: null,
+    emote_spans: [],
   };
 }
 

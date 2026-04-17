@@ -1,10 +1,15 @@
 //! Baseline benchmarks for the host's ring-buffer drain + parse hot path.
 //!
 //! Enabled only under `cargo bench --features __bench` (see `Cargo.toml`).
-//! Three groups:
+//! Four groups:
 //! - `drain_only`    — `RingBufReader::drain()` on a pre-filled ring
 //! - `parse_only`    — `host::parse_batch` on a pre-built `Vec<Vec<u8>>`
 //! - `drain_and_parse` — the full hot-loop shape the supervisor runs
+//!
+//! Parse and drain+parse are swept across both an empty [`EmoteIndex`]
+//! (lower bound, scan short-circuits) and a populated one sized like a
+//! real channel join (~500 codes with a handful matching the fixture
+//! message), so the numbers bracket the true hot-path cost.
 //!
 //! See PRI-15 for why this lands first and PRI-8 for what the numbers
 //! are meant to gate.
@@ -19,6 +24,7 @@ use criterion::{
     black_box, criterion_group, criterion_main, BatchSize, BenchmarkId, Criterion, Throughput,
 };
 
+use prismoid_lib::emote_index::{EmoteBundle, EmoteIndex, EmoteMeta, EmoteSet, Provider};
 use prismoid_lib::ringbuf::RingBufReader;
 use prismoid_lib::{parse_batch, UnifiedMessage};
 
@@ -112,46 +118,139 @@ fn drain_only(c: &mut Criterion) {
 
 fn parse_only(c: &mut Criterion) {
     let mut group = c.benchmark_group("parse_only");
+    let empty = EmoteIndex::new();
+    let populated = populated_index();
     for &n in SWEEP_SIZES {
         let raw: Vec<Vec<u8>> = (0..n).map(|_| TWITCH_MESSAGE.to_vec()).collect();
         let mut batch: Vec<UnifiedMessage> = Vec::with_capacity(n as usize);
         group.throughput(Throughput::Elements(n as u64));
-        group.bench_with_input(BenchmarkId::from_parameter(n), &raw, |b, raw| {
-            b.iter(|| {
-                batch.clear();
-                parse_batch(raw, &mut batch);
-                black_box(&batch);
-            });
-        });
+        for (label, idx) in [("empty", &empty), ("populated", &populated)] {
+            group.bench_with_input(
+                BenchmarkId::new(label, n),
+                &(raw.clone(), idx),
+                |b, (raw, idx)| {
+                    b.iter(|| {
+                        batch.clear();
+                        parse_batch(raw, &mut batch, idx);
+                        black_box(&batch);
+                    });
+                },
+            );
+        }
     }
     group.finish();
 }
 
 fn drain_and_parse(c: &mut Criterion) {
     let mut group = c.benchmark_group("drain_and_parse");
+    let empty = EmoteIndex::new();
+    let populated = populated_index();
     for &n in SWEEP_SIZES {
         let mut batch: Vec<UnifiedMessage> = Vec::with_capacity(n as usize);
         group.throughput(Throughput::Elements(n as u64));
-        group.bench_with_input(BenchmarkId::from_parameter(n), &n, |b, &n| {
-            b.iter_batched_ref(
-                || {
-                    let reader =
-                        RingBufReader::create_owner(BENCH_CAPACITY).expect("owner ring for bench");
-                    let payloads: Vec<&[u8]> = (0..n).map(|_| TWITCH_MESSAGE).collect();
-                    reader.__bench_write(&payloads);
-                    reader
-                },
-                |reader| {
-                    batch.clear();
-                    let raw = reader.drain();
-                    parse_batch(&raw, &mut batch);
-                    black_box(&batch);
-                },
-                BatchSize::SmallInput,
-            );
-        });
+        for (label, idx) in [("empty", &empty), ("populated", &populated)] {
+            group.bench_with_input(BenchmarkId::new(label, n), &n, |b, &n| {
+                b.iter_batched_ref(
+                    || {
+                        let reader = RingBufReader::create_owner(BENCH_CAPACITY)
+                            .expect("owner ring for bench");
+                        let payloads: Vec<&[u8]> = (0..n).map(|_| TWITCH_MESSAGE).collect();
+                        reader.__bench_write(&payloads);
+                        reader
+                    },
+                    |reader| {
+                        batch.clear();
+                        let raw = reader.drain();
+                        parse_batch(&raw, &mut batch, idx);
+                        black_box(&batch);
+                    },
+                    BatchSize::SmallInput,
+                );
+            });
+        }
     }
     group.finish();
+}
+
+/// Builds an [`EmoteIndex`] roughly the size of a real channel join:
+/// ~500 codes across Twitch, 7TV, BTTV, and FFZ globals + channel sets.
+/// A handful of codes deliberately match tokens inside `TWITCH_MESSAGE`
+/// ("this", "chat", "message", "stream") so aho-corasick iteration
+/// produces both hits and misses instead of a purely cold walk.
+fn populated_index() -> EmoteIndex {
+    fn meta(code: &str, provider: Provider) -> EmoteMeta {
+        EmoteMeta {
+            id: code.into(),
+            code: code.into(),
+            provider,
+            url_1x: "https://cdn/1x".into(),
+            url_2x: "".into(),
+            url_4x: "".into(),
+            width: 28,
+            height: 28,
+            animated: false,
+            zero_width: false,
+        }
+    }
+
+    // Realistic matchers against the fixture message body.
+    let matching = [
+        "this", "chat", "message", "stream", "the", "about", "length",
+    ];
+    // Filler to hit ~500 codes total. Keep codes short and camel-case so
+    // the aho-corasick automaton resembles a real emote catalog, where
+    // most codes are 4-12 chars and begin with a capital letter.
+    let filler_roots = [
+        "Kappa", "PogU", "OMEGALUL", "Pepe", "Monka", "Kek", "Pog", "LUL", "Sad", "Hype", "Jam",
+        "Dance", "Clap", "Wave", "Wink", "Stare", "Cry", "Laugh", "Angy", "Chill", "Cozy", "Doge",
+        "Catto", "Birb", "Based", "Cringe", "Copium", "Hopium", "Juicer", "Griddy", "Yeet", "Vibe",
+        "Wiggle", "Spin", "Nod", "Shrug", "Facepalm", "Gachi", "EZ", "Bruh",
+    ];
+    let mut twitch_global = Vec::with_capacity(matching.len() + filler_roots.len() * 3);
+    for code in matching {
+        twitch_global.push(meta(code, Provider::Twitch));
+    }
+    for root in filler_roots {
+        twitch_global.push(meta(root, Provider::Twitch));
+    }
+    let seventv_global: Vec<EmoteMeta> = filler_roots
+        .iter()
+        .flat_map(|r| {
+            [
+                format!("{r}W"),
+                format!("{r}2"),
+                format!("{r}X"),
+                format!("{r}Jam"),
+            ]
+        })
+        .map(|c| meta(&c, Provider::SevenTv))
+        .collect();
+    let bttv_global: Vec<EmoteMeta> = filler_roots
+        .iter()
+        .flat_map(|r| [format!("B{r}"), format!("{r}B")])
+        .map(|c| meta(&c, Provider::Bttv))
+        .collect();
+    let ffz_global: Vec<EmoteMeta> = filler_roots
+        .iter()
+        .map(|r| meta(&format!("F{r}"), Provider::Ffz))
+        .collect();
+
+    let bundle = EmoteBundle {
+        twitch_global_emotes: EmoteSet {
+            emotes: twitch_global,
+        },
+        seventv_global: EmoteSet {
+            emotes: seventv_global,
+        },
+        bttv_global: EmoteSet {
+            emotes: bttv_global,
+        },
+        ffz_global: EmoteSet { emotes: ffz_global },
+        ..Default::default()
+    };
+    let idx = EmoteIndex::new();
+    idx.load_bundle(bundle);
+    idx
 }
 
 criterion_group!(benches, drain_only, parse_only, drain_and_parse);

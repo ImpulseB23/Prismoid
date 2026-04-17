@@ -11,7 +11,7 @@ use std::time::Duration;
 
 use serde::Serialize;
 
-use crate::emote_index::EmoteBundle;
+use crate::emote_index::{EmoteBundle, EmoteIndex};
 use crate::message::{parse_twitch_envelope, UnifiedMessage};
 use crate::ringbuf::RawHandle;
 
@@ -41,15 +41,23 @@ pub struct TwitchCreds {
 /// The caller is responsible for clearing the scratch between drain ticks;
 /// this function only appends.
 ///
+/// Each successful parse is scanned against `emote_index` and the resulting
+/// spans are attached to the message. Scans are cheap when the index is
+/// empty (no automaton, early return) so passing a fresh index is fine in
+/// tests and during the gap before `emote_bundle` arrives.
+///
 /// Messages that fail to parse or that aren't chat notifications are dropped
 /// with a log. Each parse is wrapped in `catch_unwind` so a panicking parser
 /// cannot kill the drain loop (`docs/stability.md` §Rust Panic Handling).
-pub fn parse_batch(raw: &[Vec<u8>], batch: &mut Vec<UnifiedMessage>) {
+pub fn parse_batch(raw: &[Vec<u8>], batch: &mut Vec<UnifiedMessage>, emote_index: &EmoteIndex) {
     for payload in raw {
         let slice = payload.as_slice();
         let outcome = std::panic::catch_unwind(|| parse_twitch_envelope(slice));
         match outcome {
-            Ok(Ok(Some(msg))) => batch.push(msg),
+            Ok(Ok(Some(mut msg))) => {
+                emote_index.scan_into(&msg.message_text, &mut msg.emote_spans);
+                batch.push(msg);
+            }
             Ok(Ok(None)) => {}
             Ok(Err(e)) => {
                 tracing::warn!(error = %e, "parse failed, dropping message");
@@ -264,15 +272,18 @@ mod tests {
 
         let raw = vec![viewer, keepalive, junk];
         let mut batch = Vec::new();
-        parse_batch(&raw, &mut batch);
+        let idx = EmoteIndex::new();
+        parse_batch(&raw, &mut batch, &idx);
         assert_eq!(batch.len(), 1);
         assert_eq!(batch[0].message_text, "hi");
+        assert!(batch[0].emote_spans.is_empty());
     }
 
     #[test]
     fn parse_batch_empty_input() {
         let mut batch = Vec::new();
-        parse_batch(&[], &mut batch);
+        let idx = EmoteIndex::new();
+        parse_batch(&[], &mut batch, &idx);
         assert!(batch.is_empty());
     }
 
@@ -293,15 +304,55 @@ mod tests {
         }"##.to_vec();
 
         let mut batch = Vec::new();
+        let idx = EmoteIndex::new();
         // Pretend a previous tick left one item in the scratch.
-        parse_batch(std::slice::from_ref(&viewer), &mut batch);
+        parse_batch(std::slice::from_ref(&viewer), &mut batch, &idx);
         assert_eq!(batch.len(), 1);
         assert_eq!(batch[0].message_text, "second");
 
         // Second call appends, scratch is NOT cleared.
-        parse_batch(std::slice::from_ref(&viewer), &mut batch);
+        parse_batch(std::slice::from_ref(&viewer), &mut batch, &idx);
         assert_eq!(batch.len(), 2);
         assert_eq!(batch[1].message_text, "second");
+    }
+
+    #[test]
+    fn parse_batch_attaches_emote_spans_from_index() {
+        use crate::emote_index::{EmoteMeta, Provider};
+
+        let viewer = br##"{
+            "metadata": {"message_id":"m","message_type":"notification","message_timestamp":"2023-11-06T18:11:47.492Z"},
+            "payload": {
+                "subscription": {"type":"channel.chat.message"},
+                "event": {
+                    "chatter_user_id":"1","chatter_user_login":"u","chatter_user_name":"U",
+                    "message_id":"mid","message":{"text":"hello Kappa world"}
+                }
+            }
+        }"##.to_vec();
+
+        let idx = EmoteIndex::new();
+        idx.load([EmoteMeta {
+            id: "1".into(),
+            code: "Kappa".into(),
+            provider: Provider::Twitch,
+            url_1x: "https://t/1".into(),
+            url_2x: "".into(),
+            url_4x: "".into(),
+            width: 28,
+            height: 28,
+            animated: false,
+            zero_width: false,
+        }]);
+
+        let mut batch = Vec::new();
+        parse_batch(std::slice::from_ref(&viewer), &mut batch, &idx);
+        assert_eq!(batch.len(), 1);
+        assert_eq!(batch[0].emote_spans.len(), 1);
+        let span = &batch[0].emote_spans[0];
+        assert_eq!(span.start, 6);
+        assert_eq!(span.end, 11);
+        assert_eq!(span.emote.code.as_ref(), "Kappa");
     }
 
     #[cfg(windows)]

@@ -4,6 +4,36 @@
 
 import { createSignal } from "solid-js";
 
+export interface EmoteMeta {
+  id: string;
+  code: string;
+  provider: "twitch" | "7tv" | "bttv" | "ffz";
+  url_1x: string;
+  url_2x: string;
+  url_4x: string;
+  width: number;
+  height: number;
+  animated: boolean;
+  zero_width: boolean;
+}
+
+/**
+ * One scanned emote occurrence inside `ChatMessage.message_text`.
+ *
+ * `start` and `end` are **UTF-8 byte offsets** as produced by the Rust
+ * scanner, not UTF-16 code-unit offsets. JavaScript string indexing
+ * (`String.prototype.slice`, `[]`, etc.) operates on UTF-16, so renderers
+ * that splice the message around emote spans must translate first. The
+ * straightforward way is to encode `message_text` once with `TextEncoder`
+ * and slice the resulting `Uint8Array`, decoding each segment with
+ * `TextDecoder`. For ASCII-only messages the two are equivalent.
+ */
+export interface EmoteSpan {
+  start: number;
+  end: number;
+  emote: EmoteMeta;
+}
+
 export interface ChatMessage {
   id: string;
   platform: "Twitch" | "YouTube" | "Kick";
@@ -19,6 +49,7 @@ export interface ChatMessage {
   is_broadcaster: boolean;
   color: string | null;
   reply_to: string | null;
+  emote_spans: EmoteSpan[];
 }
 
 export interface Viewport {

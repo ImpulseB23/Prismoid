@@ -164,7 +164,7 @@ impl EmoteBundle {
 /// Byte range of a matched emote code inside a message's `message_text`,
 /// plus the resolved emote metadata. `start..end` is a UTF-8 byte slice of
 /// the original text.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct EmoteSpan {
     pub start: u32,
     pub end: u32,

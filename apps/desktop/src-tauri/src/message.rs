@@ -3,6 +3,8 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::emote_index::EmoteSpan;
+
 #[derive(Debug, Clone, Serialize)]
 pub enum Platform {
     Twitch,
@@ -36,6 +38,10 @@ pub struct UnifiedMessage {
     pub is_broadcaster: bool,
     pub color: Option<String>,
     pub reply_to: Option<String>,
+    /// Emote matches inside [`message_text`](Self::message_text), populated
+    /// by [`crate::emote_index::EmoteIndex::scan_into`] after parsing.
+    /// Empty when no index is active or the message has no emotes.
+    pub emote_spans: Vec<EmoteSpan>,
 }
 
 #[derive(Debug)]
@@ -197,6 +203,7 @@ pub fn parse_twitch_envelope(bytes: &[u8]) -> Result<Option<UnifiedMessage>, Par
         is_broadcaster,
         color: event.color,
         reply_to: event.reply.map(|r| r.parent_message_id),
+        emote_spans: Vec::new(),
     }))
 }
 
