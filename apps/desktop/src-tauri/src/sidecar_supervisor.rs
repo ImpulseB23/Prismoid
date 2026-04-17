@@ -473,6 +473,19 @@ fn handle_sidecar_stdout<R: Runtime>(
     app: &AppHandle<R>,
     emote_index: &Arc<EmoteIndex>,
 ) -> bool {
+    scan_sidecar_stdout(bytes, |bundle| apply_emote_bundle(bundle, app, emote_index))
+}
+
+/// Pure scan-and-dispatch core of [`handle_sidecar_stdout`]. Splits the
+/// batch on newlines, parses each non-empty piece via
+/// [`parse_sidecar_event`], returns `true` if any line was a heartbeat,
+/// and invokes `on_bundle` for each parsed [`EmoteBundle`]. Factored out
+/// from `handle_sidecar_stdout` so it can be unit-tested without a Tauri
+/// runtime (the AppHandle-dependent work happens inside the closure).
+fn scan_sidecar_stdout<F>(bytes: &[u8], mut on_bundle: F) -> bool
+where
+    F: FnMut(Box<crate::emote_index::EmoteBundle>),
+{
     let mut saw_heartbeat = false;
     for line in bytes.split(|b| *b == b'\n') {
         if line.is_empty() {
@@ -480,7 +493,7 @@ fn handle_sidecar_stdout<R: Runtime>(
         }
         match parse_sidecar_event(line) {
             SidecarEvent::Heartbeat => saw_heartbeat = true,
-            SidecarEvent::EmoteBundle(bundle) => apply_emote_bundle(bundle, app, emote_index),
+            SidecarEvent::EmoteBundle(bundle) => on_bundle(bundle),
             SidecarEvent::Other(t) => {
                 tracing::debug!(msg_type = %t, "unhandled sidecar control message");
             }
@@ -593,5 +606,64 @@ mod tests {
         let v: serde_json::Value = serde_json::to_value(&status).unwrap();
         assert_eq!(v["state"], "backoff");
         assert_eq!(v["backoff_ms"], 4000);
+    }
+
+    const VALID_EMOTE_BUNDLE_LINE: &[u8] = br#"{"type":"emote_bundle","payload":{"twitch_global_emotes":{"provider":"twitch","scope":"global","emotes":[{"id":"1","code":"Kappa","provider":"twitch","url_1x":"https://t/1"}]},"twitch_channel_emotes":{"provider":"twitch","scope":"channel","emotes":[]},"twitch_global_badges":{"scope":"global","badges":[]},"twitch_channel_badges":{"scope":"channel","badges":[]},"seventv_global":{"provider":"7tv","scope":"global","emotes":[]},"seventv_channel":{"provider":"7tv","scope":"channel","emotes":[]},"bttv_global":{"provider":"bttv","scope":"global","emotes":[]},"bttv_channel":{"provider":"bttv","scope":"channel","emotes":[]},"ffz_global":{"provider":"ffz","scope":"global","emotes":[]},"ffz_channel":{"provider":"ffz","scope":"channel","emotes":[]}}}"#;
+
+    #[test]
+    fn scan_sidecar_stdout_returns_false_on_empty_input() {
+        assert!(!scan_sidecar_stdout(b"", |_| panic!("no bundle")));
+        assert!(!scan_sidecar_stdout(b"\n\n\n", |_| panic!("no bundle")));
+    }
+
+    #[test]
+    fn scan_sidecar_stdout_detects_single_heartbeat() {
+        let line = br#"{"type":"heartbeat","payload":{"ts_ms":1,"counter":1}}"#;
+        assert!(scan_sidecar_stdout(line, |_| panic!("no bundle")));
+    }
+
+    #[test]
+    fn scan_sidecar_stdout_detects_heartbeat_in_multi_line_batch() {
+        let mut batch = Vec::new();
+        batch.extend_from_slice(b"garbage line\n");
+        batch.extend_from_slice(br#"{"type":"future_thing","payload":{}}"#);
+        batch.push(b'\n');
+        batch.extend_from_slice(br#"{"type":"heartbeat","payload":{"ts_ms":1,"counter":1}}"#);
+        batch.push(b'\n');
+        assert!(scan_sidecar_stdout(&batch, |_| panic!("no bundle")));
+    }
+
+    #[test]
+    fn scan_sidecar_stdout_reports_false_when_only_non_heartbeat_events() {
+        let mut batch = Vec::new();
+        batch.extend_from_slice(b"not json\n");
+        batch.extend_from_slice(br#"{"type":"future_thing","payload":{}}"#);
+        assert!(!scan_sidecar_stdout(&batch, |_| panic!("no bundle")));
+    }
+
+    #[test]
+    fn scan_sidecar_stdout_dispatches_emote_bundle_and_tracks_heartbeat() {
+        let mut batch = Vec::new();
+        batch.extend_from_slice(VALID_EMOTE_BUNDLE_LINE);
+        batch.push(b'\n');
+        batch.extend_from_slice(br#"{"type":"heartbeat","payload":{"ts_ms":2,"counter":2}}"#);
+
+        let mut bundles = 0_usize;
+        let saw_heartbeat = scan_sidecar_stdout(&batch, |bundle| {
+            assert_eq!(bundle.total_emotes(), 1);
+            bundles += 1;
+        });
+
+        assert!(saw_heartbeat);
+        assert_eq!(bundles, 1);
+    }
+
+    #[test]
+    fn scan_sidecar_stdout_skips_empty_segments_between_newlines() {
+        let mut batch = Vec::new();
+        batch.extend_from_slice(b"\n\n");
+        batch.extend_from_slice(br#"{"type":"heartbeat","payload":{"ts_ms":3,"counter":3}}"#);
+        batch.extend_from_slice(b"\n\n");
+        assert!(scan_sidecar_stdout(&batch, |_| panic!("no bundle")));
     }
 }
