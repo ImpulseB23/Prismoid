@@ -1,6 +1,37 @@
 import { Title, Meta } from "@solidjs/meta";
+import { createSignal, onCleanup } from "solid-js";
 import GithubPreview from "~/components/GithubPreview";
 import "./index.css";
+
+const DOWNLOAD_TEASERS = [
+  "still cooking",
+  "soon™",
+  "compiling",
+  "not yet",
+  "patience",
+  "writing the tests",
+  "fighting the borrow checker",
+  "waiting on CI",
+  "v0.0.0-notyet",
+  "one more refactor",
+];
+
+function DownloadTeaser() {
+  const [i, setI] = createSignal(0);
+  const id = setInterval(
+    () => setI((n) => (n + 1) % DOWNLOAD_TEASERS.length),
+    2200,
+  );
+  onCleanup(() => clearInterval(id));
+  return (
+    <span
+      class="btn btn-primary btn-disabled"
+      title="no releases yet, but keep watching"
+    >
+      Download <span class="download-teaser">({DOWNLOAD_TEASERS[i()]})</span>
+    </span>
+  );
+}
 
 const GitHubIcon = () => (
   <svg viewBox="0 0 16 16" fill="currentColor">
@@ -64,9 +95,7 @@ export default function Home() {
           </span>
         </div>
         <div class="hero-actions">
-          <span class="btn btn-primary btn-disabled" title="No releases yet">
-            Download
-          </span>
+          <DownloadTeaser />
           <GithubPreview
             href="https://github.com/ImpulseB23/Prismoid"
             class="btn btn-outline"
