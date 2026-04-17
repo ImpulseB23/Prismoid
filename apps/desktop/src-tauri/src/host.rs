@@ -162,8 +162,9 @@ pub enum SidecarEvent {
     /// variant is currently just a structured marker for future watchdogs.
     Heartbeat,
     /// `{"type":"emote_bundle","payload":Bundle}`. Built on channel-join,
-    /// consumed by the host to rebuild its emote index.
-    EmoteBundle(EmoteBundle),
+    /// consumed by the host to rebuild its emote index. Boxed because the
+    /// bundle is much larger than the other variants.
+    EmoteBundle(Box<EmoteBundle>),
     /// A well-formed `{type, payload}` message the host does not yet
     /// recognize. The inner string is the type tag.
     Other(String),
@@ -200,7 +201,7 @@ pub fn parse_sidecar_event(bytes: &[u8]) -> SidecarEvent {
         "emote_bundle" => {
             let payload = env.payload.unwrap_or(serde_json::Value::Null);
             match serde_json::from_value::<EmoteBundle>(payload) {
-                Ok(b) => SidecarEvent::EmoteBundle(b),
+                Ok(b) => SidecarEvent::EmoteBundle(Box::new(b)),
                 Err(e) => {
                     tracing::warn!(error = %e, "emote_bundle payload decode failed");
                     SidecarEvent::Invalid

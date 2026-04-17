@@ -406,9 +406,14 @@ fn drain_and_emit<R: Runtime>(
     }
 }
 
-/// Processes one or more lines of sidecar stdout. Tauri's shell plugin may
-/// coalesce multiple JSON lines into a single [`CommandEvent::Stdout`], so
-/// we split on newlines and parse each piece independently.
+/// Processes one line of sidecar stdout. Tauri's shell plugin (in
+/// non-raw mode, which is our default) emits one [`CommandEvent::Stdout`]
+/// per `\n`-terminated line written by the child, with the trailing
+/// newline stripped, so a partial line never reaches us. The split-on-`\n`
+/// here is defensive: if the plugin ever changes that contract or the
+/// sidecar buffers multiple JSON objects per write, each object still
+/// parses independently. Empty pieces (trailing newline, blank lines) are
+/// skipped.
 #[cfg(windows)]
 fn handle_sidecar_stdout<R: Runtime>(
     bytes: &[u8],
@@ -433,11 +438,14 @@ fn handle_sidecar_stdout<R: Runtime>(
 }
 
 /// Swaps a fresh [`EmoteBundle`] into the supervisor's [`EmoteIndex`] and
-/// forwards a clone to the frontend for emote URL rendering. The index
-/// swap uses [`EmoteIndex::load_bundle`] (lock-free for readers).
+/// forwards a clone to the frontend. The frontend gets the full bundle
+/// (emotes + badges + per-provider errors) so it can render emote and
+/// badge images and surface partial-failure state without a second round
+/// trip; only the emote sets feed [`EmoteIndex::load_bundle`], which is
+/// lock-free for readers.
 #[cfg(windows)]
 fn apply_emote_bundle<R: Runtime>(
-    bundle: EmoteBundle,
+    bundle: Box<EmoteBundle>,
     app: &AppHandle<R>,
     emote_index: &Arc<EmoteIndex>,
 ) {
@@ -445,10 +453,10 @@ fn apply_emote_bundle<R: Runtime>(
     // Frontend needs the full bundle to render URLs; cloning is cheap
     // compared to the network fetch that produced it and happens at most
     // once per channel join.
-    if let Err(e) = app.emit("emote_bundle", &bundle) {
+    if let Err(e) = app.emit("emote_bundle", bundle.as_ref()) {
         tracing::error!(error = %e, "failed to emit emote_bundle");
     }
-    emote_index.load_bundle(bundle);
+    emote_index.load_bundle(*bundle);
     tracing::info!(total_emotes = total, "emote index rebuilt");
 }
 
