@@ -76,11 +76,14 @@
   align-items: center;
 }
 
+.hero-actions .btn {
+  width: 10.5rem;
+  justify-content: center;
+}
+
 .btn-teaser {
   font: inherit;
   cursor: pointer;
-  width: 9rem;
-  text-align: center;
   white-space: nowrap;
   overflow: hidden;
 }
