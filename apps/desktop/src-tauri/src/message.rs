@@ -16,10 +16,21 @@ pub enum Platform {
     Kick,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Default)]
 pub struct Badge {
     pub set_id: String,
     pub id: String,
+    /// Resolved by [`crate::badge_index::BadgeIndex::resolve_into`] after
+    /// parsing. Empty when the channel's badge bundle hasn't arrived yet
+    /// or the badge isn't in the index (unknown set/version).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub title: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub url_1x: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub url_2x: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub url_4x: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -180,6 +191,7 @@ pub fn parse_twitch_envelope(bytes: &[u8]) -> Result<Option<UnifiedMessage>, Par
         .map(|b| Badge {
             set_id: b.set_id,
             id: b.id,
+            ..Badge::default()
         })
         .collect();
     let is_broadcaster = badges.iter().any(|b| b.set_id == "broadcaster");

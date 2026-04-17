@@ -10,6 +10,7 @@ import {
 } from "@chenglou/pretext/rich-inline";
 import { measureNaturalWidth, prepareWithSegments } from "@chenglou/pretext";
 import type { ChatMessage } from "../stores/chatStore";
+import type { ResolvedBadge } from "../stores/badgeStore";
 import { splitMessage, type MessagePiece } from "./emoteSpans";
 
 // Named families only. `system-ui` is unsafe for pretext accuracy on macOS.
@@ -30,6 +31,12 @@ export const MESSAGE_PADDING_Y = 4;
 // overflow will never wrap and measured heights will be too small.
 export const MESSAGE_PADDING_X = 8;
 
+// Rendered badge size. Kept square and identical across providers so that
+// mixed-platform chat visually aligns vertically.
+export const BADGE_SIZE_PX = 18;
+// Horizontal gap after each badge, before the next badge or the username.
+export const BADGE_GAP_PX = 4;
+
 // NBSP is not collapsed by Pretext's boundary-whitespace rules, so it
 // survives as a measurable placeholder. Each emote becomes an atomic
 // (`break: "never"`) item whose total width equals the NBSP natural
@@ -45,22 +52,48 @@ function placeholderWidth(font: string): number {
   return w;
 }
 
+export interface BadgeRender {
+  badge: ResolvedBadge;
+  setId: string;
+  id: string;
+}
+
 export interface PreparedMessage {
   prepared: PreparedRichInline;
   pieces: MessagePiece[];
+  badges: BadgeRender[];
 }
 
-export function prepareMessage(msg: ChatMessage): PreparedMessage {
+export function prepareMessage(
+  msg: ChatMessage,
+  resolveBadge: (setId: string, id: string) => ResolvedBadge | undefined,
+): PreparedMessage {
   const pieces = splitMessage(msg.message_text, msg.emote_spans, {
     maxHeight: MESSAGE_LINE_HEIGHT,
   });
 
-  const items: RichInlineItem[] = [
+  const badges: BadgeRender[] = [];
+  for (const b of msg.badges) {
+    const resolved = resolveBadge(b.set_id, b.id);
+    if (resolved) badges.push({ badge: resolved, setId: b.set_id, id: b.id });
+  }
+
+  const items: RichInlineItem[] = [];
+  const placeholder = placeholderWidth(TEXT_FONT);
+  const badgeExtra = Math.max(0, BADGE_SIZE_PX + BADGE_GAP_PX - placeholder);
+  for (let i = 0; i < badges.length; i++) {
+    items.push({
+      text: EMOTE_PLACEHOLDER,
+      font: TEXT_FONT,
+      break: "never",
+      extraWidth: badgeExtra,
+    });
+  }
+  items.push(
     { text: msg.display_name, font: USERNAME_FONT, break: "never" },
     { text: ": ", font: SEPARATOR_FONT },
-  ];
+  );
 
-  const placeholder = placeholderWidth(TEXT_FONT);
   for (const piece of pieces) {
     if (piece.kind === "text") {
       items.push({ text: piece.text, font: TEXT_FONT });
@@ -74,7 +107,7 @@ export function prepareMessage(msg: ChatMessage): PreparedMessage {
     }
   }
 
-  return { prepared: prepareRichInline(items), pieces };
+  return { prepared: prepareRichInline(items), pieces, badges };
 }
 
 export function measureMessageHeight(

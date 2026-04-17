@@ -21,6 +21,14 @@ import {
   type ChatMessage,
 } from "../stores/chatStore";
 import {
+  loadBadgeBundle,
+  resolveBadge,
+  badgeRevision,
+  type EmoteBundle,
+} from "../stores/badgeStore";
+import {
+  BADGE_GAP_PX,
+  BADGE_SIZE_PX,
   MESSAGE_FONT_FAMILY,
   MESSAGE_FONT_SIZE_PX,
   MESSAGE_LINE_HEIGHT,
@@ -92,6 +100,7 @@ interface PositionedMessage {
 const ChatFeed: Component = () => {
   let containerRef: HTMLDivElement | undefined;
   const preparedCache = new Map<number, PreparedMessage>();
+  let lastBadgeRev = 0;
 
   const [width, setWidth] = createSignal(0);
   const [viewportHeight, setViewportHeight] = createSignal(0);
@@ -122,6 +131,9 @@ const ChatFeed: Component = () => {
   }>(() => {
     const v = viewport();
     const w = width();
+    // Read the badge revision so bundle reloads invalidate the prepared
+    // cache and trigger a full re-measure.
+    const rev = badgeRevision();
     if (!fontsLoaded() || w <= 0 || v.count === 0) {
       return { messages: [], totalHeight: 0 };
     }
@@ -132,6 +144,10 @@ const ChatFeed: Component = () => {
     for (const key of preparedCache.keys()) {
       if (key < liveStart) preparedCache.delete(key);
     }
+    if (rev !== lastBadgeRev) {
+      preparedCache.clear();
+      lastBadgeRev = rev;
+    }
 
     const messages: PositionedMessage[] = new Array(v.count);
     let y = 0;
@@ -141,7 +157,7 @@ const ChatFeed: Component = () => {
       if (!msg) continue;
       let prepared = preparedCache.get(mono);
       if (prepared === undefined) {
-        prepared = prepareMessage(msg);
+        prepared = prepareMessage(msg, resolveBadge);
         preparedCache.set(mono, prepared);
       }
       const height = measureMessageHeight(prepared.prepared, w);
@@ -225,6 +241,7 @@ const ChatFeed: Component = () => {
     }
 
     let unlisten: (() => void) | undefined;
+    let unlistenBundle: (() => void) | undefined;
     listen<ChatMessage[]>("chat_messages", (event) => {
       addMessages(event.payload);
     })
@@ -235,9 +252,20 @@ const ChatFeed: Component = () => {
         console.error("failed to listen for chat messages:", err),
       );
 
+    listen<EmoteBundle>("emote_bundle", (event) => {
+      loadBadgeBundle(event.payload);
+    })
+      .then((fn) => {
+        unlistenBundle = fn;
+      })
+      .catch((err) =>
+        console.error("failed to listen for emote bundles:", err),
+      );
+
     onCleanup(() => {
       ro.disconnect();
       unlisten?.();
+      unlistenBundle?.();
     });
   });
 
@@ -278,6 +306,30 @@ const ChatFeed: Component = () => {
                 "overflow-wrap": "break-word",
               }}
             >
+              <For each={item.prepared.badges}>
+                {(b) => (
+                  <img
+                    src={b.badge.url_1x}
+                    srcset={
+                      b.badge.url_2x
+                        ? `${b.badge.url_1x} 1x, ${b.badge.url_2x} 2x${
+                            b.badge.url_4x ? `, ${b.badge.url_4x} 4x` : ""
+                          }`
+                        : undefined
+                    }
+                    alt={b.badge.title}
+                    title={b.badge.title}
+                    width={BADGE_SIZE_PX}
+                    height={BADGE_SIZE_PX}
+                    draggable={false}
+                    style={{
+                      display: "inline-block",
+                      "vertical-align": "middle",
+                      "margin-right": `${BADGE_GAP_PX}px`,
+                    }}
+                  />
+                )}
+              </For>
               <span
                 style={{
                   color: item.msg.color || "#9147ff",

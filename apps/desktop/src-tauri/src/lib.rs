@@ -4,6 +4,7 @@ pub mod ringbuf;
 mod sidecar_supervisor;
 pub mod twitch_auth;
 
+pub mod badge_index;
 pub mod emote_index;
 
 // Re-exports for the bench harness. Gated so the public crate surface
