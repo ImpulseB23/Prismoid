@@ -11,7 +11,6 @@ use std::time::Duration;
 
 use serde::Serialize;
 
-use crate::badge_index::BadgeIndex;
 use crate::emote_index::{EmoteBundle, EmoteIndex};
 use crate::message::{parse_twitch_envelope, UnifiedMessage};
 use crate::ringbuf::RawHandle;
@@ -42,28 +41,24 @@ pub struct TwitchCreds {
 /// The caller is responsible for clearing the scratch between drain ticks;
 /// this function only appends.
 ///
-/// Each successful parse is scanned agIts badges are then resolved against
-/// `badge_index` so the frontend receives fully hydrated badge URLs +
-/// titles. Both scans are cheap when the respective index is empty (no
-/// automaton / empty map, early return) so passing fresh indexes is fine
-/// in tests and during the gap before `emote_bundle` arrives.
+/// Each successful parse is scanned for emotes against `emote_index`. The
+/// scan is cheap when the index is empty (no automaton, early return) so
+/// passing a fresh index is fine in tests and during the gap before
+/// `emote_bundle` arrives. Badges stay as `{set_id, id}` pairs on the
+/// wire; the frontend resolves them against its own bundle-derived store,
+/// which keeps the hot path allocation-free and avoids copying the same
+/// URL strings into every message.
 ///
 /// Messages that fail to parse or that aren't chat notifications are dropped
 /// with a log. Each parse is wrapped in `catch_unwind` so a panicking parser
 /// cannot kill the drain loop (`docs/stability.md` §Rust Panic Handling).
-pub fn parse_batch(
-    raw: &[Vec<u8>],
-    batch: &mut Vec<UnifiedMessage>,
-    emote_index: &EmoteIndex,
-    badge_index: &BadgeIndex,
-) {
+pub fn parse_batch(raw: &[Vec<u8>], batch: &mut Vec<UnifiedMessage>, emote_index: &EmoteIndex) {
     for payload in raw {
         let slice = payload.as_slice();
         let outcome = std::panic::catch_unwind(|| parse_twitch_envelope(slice));
         match outcome {
             Ok(Ok(Some(mut msg))) => {
                 emote_index.scan_into(&msg.message_text, &mut msg.emote_spans);
-                badge_index.resolve_into(&mut msg.badges);
                 batch.push(msg);
             }
             Ok(Ok(None)) => {}
@@ -281,8 +276,7 @@ mod tests {
         let raw = vec![viewer, keepalive, junk];
         let mut batch = Vec::new();
         let idx = EmoteIndex::new();
-        let badges = BadgeIndex::new();
-        parse_batch(&raw, &mut batch, &idx, &badges);
+        parse_batch(&raw, &mut batch, &idx);
         assert_eq!(batch.len(), 1);
         assert_eq!(batch[0].message_text, "hi");
         assert!(batch[0].emote_spans.is_empty());
@@ -292,8 +286,7 @@ mod tests {
     fn parse_batch_empty_input() {
         let mut batch = Vec::new();
         let idx = EmoteIndex::new();
-        let badges = BadgeIndex::new();
-        parse_batch(&[], &mut batch, &idx, &badges);
+        parse_batch(&[], &mut batch, &idx);
         assert!(batch.is_empty());
     }
 
@@ -315,14 +308,13 @@ mod tests {
 
         let mut batch = Vec::new();
         let idx = EmoteIndex::new();
-        let badges = BadgeIndex::new();
         // Pretend a previous tick left one item in the scratch.
-        parse_batch(std::slice::from_ref(&viewer), &mut batch, &idx, &badges);
+        parse_batch(std::slice::from_ref(&viewer), &mut batch, &idx);
         assert_eq!(batch.len(), 1);
         assert_eq!(batch[0].message_text, "second");
 
         // Second call appends, scratch is NOT cleared.
-        parse_batch(std::slice::from_ref(&viewer), &mut batch, &idx, &badges);
+        parse_batch(std::slice::from_ref(&viewer), &mut batch, &idx);
         assert_eq!(batch.len(), 2);
         assert_eq!(batch[1].message_text, "second");
     }
@@ -357,12 +349,7 @@ mod tests {
         }]);
 
         let mut batch = Vec::new();
-        parse_batch(
-            std::slice::from_ref(&viewer),
-            &mut batch,
-            &idx,
-            &BadgeIndex::new(),
-        );
+        parse_batch(std::slice::from_ref(&viewer), &mut batch, &idx);
         assert_eq!(batch.len(), 1);
         assert_eq!(batch[0].emote_spans.len(), 1);
         let span = &batch[0].emote_spans[0];

@@ -32,7 +32,6 @@ use tauri_plugin_shell::{
 };
 
 #[cfg(windows)]
-use crate::badge_index::BadgeIndex;
 use crate::emote_index::{EmoteBundle, EmoteIndex};
 #[cfg(windows)]
 use crate::host::{
@@ -305,27 +304,18 @@ async fn run_once<R: Runtime>(
     // strand the control protocol).
     let _child = child.release();
 
-    // EmoteIndex and BadgeIndex live for the lifetime of this sidecar
-    // run; fresh ones are built on every respawn. Shared by the control-
-    // plane reader (which swaps in fresh bundles on `emote_bundle`) and
-    // the drain loop (which scans each parsed message against the current
-    // snapshots).
+    // EmoteIndex lives for the lifetime of this sidecar run; a fresh one is
+    // built on every respawn. Shared by the control-plane reader (which
+    // swaps in fresh bundles on `emote_bundle`) and the drain loop (which
+    // scans each parsed message against the current snapshot).
     let emote_index: Arc<EmoteIndex> = Arc::new(EmoteIndex::new());
-    let badge_index: Arc<BadgeIndex> = Arc::new(BadgeIndex::new());
 
     let shutdown = Arc::new(AtomicBool::new(false));
     let drain_shutdown = shutdown.clone();
     let drain_app = app.clone();
-    let drain_emotes = emote_index.clone();
-    let drain_badges = badge_index.clone();
+    let drain_index = emote_index.clone();
     let drain_handle = tauri::async_runtime::spawn_blocking(move || {
-        run_drain_loop(
-            reader,
-            drain_app,
-            drain_shutdown,
-            drain_emotes,
-            drain_badges,
-        );
+        run_drain_loop(reader, drain_app, drain_shutdown, drain_index);
     });
 
     emit_status(app, "running", attempt, None);
@@ -333,7 +323,7 @@ async fn run_once<R: Runtime>(
     while let Some(event) = rx.recv().await {
         match event {
             CommandEvent::Stdout(bytes) => {
-                handle_sidecar_stdout(&bytes, app, &emote_index, &badge_index);
+                handle_sidecar_stdout(&bytes, app, &emote_index);
             }
             CommandEvent::Stderr(bytes) => {
                 tracing::debug!(line = %String::from_utf8_lossy(&bytes), "sidecar stderr");
@@ -375,7 +365,6 @@ fn run_drain_loop<R: Runtime>(
     app: AppHandle<R>,
     shutdown: Arc<AtomicBool>,
     emote_index: Arc<EmoteIndex>,
-    badge_index: Arc<BadgeIndex>,
 ) {
     let timeout_ms: u32 = SIGNAL_WAIT_TIMEOUT
         .as_millis()
@@ -385,7 +374,7 @@ fn run_drain_loop<R: Runtime>(
 
     loop {
         if shutdown.load(Ordering::Acquire) {
-            drain_and_emit(&mut reader, &app, &mut batch, &emote_index, &badge_index);
+            drain_and_emit(&mut reader, &app, &mut batch, &emote_index);
             return;
         }
         match reader.wait_for_signal(timeout_ms) {
@@ -395,7 +384,7 @@ fn run_drain_loop<R: Runtime>(
                 return;
             }
         }
-        drain_and_emit(&mut reader, &app, &mut batch, &emote_index, &badge_index);
+        drain_and_emit(&mut reader, &app, &mut batch, &emote_index);
     }
 }
 
@@ -405,14 +394,13 @@ fn drain_and_emit<R: Runtime>(
     app: &AppHandle<R>,
     batch: &mut Vec<UnifiedMessage>,
     emote_index: &EmoteIndex,
-    badge_index: &BadgeIndex,
 ) {
     let raw = reader.drain();
     if raw.is_empty() {
         return;
     }
     batch.clear();
-    parse_batch(&raw, batch, emote_index, badge_index);
+    parse_batch(&raw, batch, emote_index);
     if batch.is_empty() {
         return;
     }
@@ -434,7 +422,6 @@ fn handle_sidecar_stdout<R: Runtime>(
     bytes: &[u8],
     app: &AppHandle<R>,
     emote_index: &Arc<EmoteIndex>,
-    badge_index: &Arc<BadgeIndex>,
 ) {
     for line in bytes.split(|b| *b == b'\n') {
         if line.is_empty() {
@@ -442,9 +429,7 @@ fn handle_sidecar_stdout<R: Runtime>(
         }
         match parse_sidecar_event(line) {
             SidecarEvent::Heartbeat => {}
-            SidecarEvent::EmoteBundle(bundle) => {
-                apply_emote_bundle(bundle, app, emote_index, badge_index)
-            }
+            SidecarEvent::EmoteBundle(bundle) => apply_emote_bundle(bundle, app, emote_index),
             SidecarEvent::Other(t) => {
                 tracing::debug!(msg_type = %t, "unhandled sidecar control message");
             }
@@ -456,35 +441,27 @@ fn handle_sidecar_stdout<R: Runtime>(
 }
 
 /// Swaps a fresh [`EmoteBundle`] into the supervisor's [`EmoteIndex`] and
-/// [`BadgeIndex`] and forwards a clone to the frontend. The frontend gets
-/// the full bundle (emotes + badges + per-provider errors) so it can
-/// render emote and badge images and surface partial-failure state
-/// without a second round trip. Both indexes rebuild lock-free so readers
-/// on the message hot path never block.
+/// forwards a clone to the frontend. The frontend gets the full bundle
+/// (emotes + badges + per-provider errors) so it can render emote and
+/// badge images and surface partial-failure state without a second round
+/// trip; only the emote sets feed [`EmoteIndex::load_bundle`], which is
+/// lock-free for readers. Badges are resolved entirely on the frontend
+/// from the same bundle — keeping the message hot path allocation-free.
 #[cfg(windows)]
 fn apply_emote_bundle<R: Runtime>(
     bundle: Box<EmoteBundle>,
     app: &AppHandle<R>,
     emote_index: &Arc<EmoteIndex>,
-    badge_index: &Arc<BadgeIndex>,
 ) {
-    let total_emotes = bundle.total_emotes();
+    let total = bundle.total_emotes();
     // Frontend needs the full bundle to render URLs; cloning is cheap
     // compared to the network fetch that produced it and happens at most
     // once per channel join.
     if let Err(e) = app.emit("emote_bundle", bundle.as_ref()) {
         tracing::error!(error = %e, "failed to emit emote_bundle");
     }
-    // Load badges first (takes bundle by ref) then hand the bundle off to
-    // the emote index by value — avoids a clone of the emote sets.
-    badge_index.load_bundle(bundle.as_ref());
-    let total_badges = badge_index.len();
     emote_index.load_bundle(*bundle);
-    tracing::info!(
-        total_emotes,
-        total_badges,
-        "emote and badge indexes rebuilt"
-    );
+    tracing::info!(total_emotes = total, "emote index rebuilt");
 }
 
 fn emit_status<R: Runtime>(
