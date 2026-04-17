@@ -1,8 +1,16 @@
-test(auth): cover AuthState command helpers
+refactor(auth): split AuthState into auth_state.rs for unit testing
 
-Refactors the twitch_auth commands to delegate to inherent AuthState
-methods so they're directly testable without a Tauri AppHandle, then
-adds tests covering: status helper logged_in/logged_out paths,
-complete_login no_pending_flow path, logout permit-storing notify,
-cancel_login idempotency, and the remaining AuthError variants
-(Keychain, Json, Config).
+Tauri command bodies can't be unit-tested without spinning up a Tauri
+runtime + WebView2 host (mock_runtime crashes with STATUS_ENTRYPOINT_NOT_FOUND
+on Windows). Standard pattern: keep #[tauri::command] functions as thin
+adapters and put all branchable logic in a separately-testable module.
+
+- Move AuthState, AuthStatus, DeviceCodeView, AuthCommandError, and the
+  From<AuthError> impl into twitch_auth/auth_state.rs along with all
+  unit tests (now reach 91.79% coverage on that file).
+- commands.rs is now ~50 lines of pure adapter delegation. Added to
+  codecov ignore list alongside lib.rs and main.rs (same rationale:
+  Tauri framework wiring without testable branches).
+- mod.rs re-exports updated; no external API change.
+
+123 lib tests still pass, clippy clean.
