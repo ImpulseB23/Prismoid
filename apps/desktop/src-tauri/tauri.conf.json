@@ -37,7 +37,7 @@
   },
   "plugins": {
     "shell": {
-      "open": false
+      "open": "^https://(?:id\\.twitch\\.tv|www\\.twitch\\.tv)/"
     }
   }
 }

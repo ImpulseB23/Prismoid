@@ -142,6 +142,20 @@ impl AuthManager {
         Ok(tokens)
     }
 
+    /// Returns the stored login handle without refreshing or contacting
+    /// Twitch. Used by the auth UI to render "Logged in as @<login>"
+    /// without paying for a network round-trip on every poll.
+    pub fn peek_login(&self) -> Result<Option<String>, AuthError> {
+        Ok(self.store.load()?.map(|t| t.login))
+    }
+
+    /// Wipes the persisted token entry. Used by the logout command. The
+    /// supervisor's next iteration will see `NoTokens` and emit
+    /// `waiting_for_auth` so the frontend can offer a fresh sign-in.
+    pub fn logout(&self) -> Result<(), AuthError> {
+        self.store.delete()
+    }
+
     async fn refresh_tokens(&self, stored: &TwitchTokens) -> Result<TwitchTokens, AuthError> {
         // Reconstruct a UserToken from the stored credentials with no
         // secret (public client per ADR 37), then call refresh_token to

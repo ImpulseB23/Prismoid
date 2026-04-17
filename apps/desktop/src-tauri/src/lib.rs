@@ -15,9 +15,7 @@ pub use host::parse_batch;
 #[doc(hidden)]
 pub use message::UnifiedMessage;
 
-#[cfg(windows)]
-use tauri::Manager;
-use tauri::Runtime;
+use tauri::{Manager, Runtime};
 use tracing_subscriber::EnvFilter;
 
 #[tauri::command]
@@ -46,25 +44,55 @@ pub fn run() {
 
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
-        .invoke_handler(tauri::generate_handler![get_platform])
+        .invoke_handler(tauri::generate_handler![
+            get_platform,
+            twitch_auth::commands::twitch_auth_status,
+            twitch_auth::commands::twitch_start_login,
+            twitch_auth::commands::twitch_complete_login,
+            twitch_auth::commands::twitch_cancel_login,
+            twitch_auth::commands::twitch_logout,
+        ])
         .setup(setup)
         .run(tauri::generate_context!())
         .expect("failed to run prismoid");
 }
 
-/// Tauri setup hook. On Windows, kicks off the sidecar supervisor which owns
-/// the full lifecycle (spawn, bootstrap, drain, respawn-on-terminate). On
-/// other platforms the supervisor is not wired up yet (ADR 18), so we log
-/// and let the Tauri app launch without it so frontend work can proceed.
+/// Tauri setup hook. Builds the shared `AuthManager` + wakeup notifier,
+/// registers them as managed state for the auth UI commands, and (on
+/// Windows) hands clones to the sidecar supervisor so a successful
+/// sign-in wakes it from `waiting_for_auth` immediately. Non-Windows
+/// targets log a warning and let the frontend boot without the sidecar
+/// (ADR 18).
 #[allow(clippy::unnecessary_wraps)]
 fn setup<R: Runtime>(app: &mut tauri::App<R>) -> Result<(), Box<dyn std::error::Error>> {
+    use std::sync::Arc;
+    use tokio::sync::Notify;
+    use twitch_auth::{AuthManager, AuthState, KeychainStore, TWITCH_CLIENT_ID};
+
+    let http_client = match reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+    {
+        Ok(client) => client,
+        Err(err) => {
+            tracing::error!(
+                error = %err,
+                "failed to build reqwest client; skipping auth manager and sidecar"
+            );
+            return Ok(());
+        }
+    };
+    let auth = Arc::new(AuthManager::builder(TWITCH_CLIENT_ID).build(KeychainStore, http_client));
+    let wakeup = Arc::new(Notify::new());
+    app.manage(AuthState::new(auth.clone(), wakeup.clone()));
+
     #[cfg(windows)]
     {
-        sidecar_supervisor::spawn(app.app_handle().clone());
+        sidecar_supervisor::spawn(app.app_handle().clone(), auth, wakeup);
     }
     #[cfg(not(windows))]
     {
-        let _ = app;
+        let _ = (auth, wakeup);
         tracing::warn!(
             "sidecar lifecycle is Windows-only for now; launching frontend without sidecar"
         );

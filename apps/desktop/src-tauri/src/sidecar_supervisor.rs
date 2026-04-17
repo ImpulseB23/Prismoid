@@ -44,7 +44,9 @@ use crate::message::UnifiedMessage;
 #[cfg(windows)]
 use crate::ringbuf::{RawHandle, RingBufReader, WaitOutcome, DEFAULT_CAPACITY};
 #[cfg(windows)]
-use crate::twitch_auth::{AuthError, AuthManager, KeychainStore, TWITCH_CLIENT_ID};
+use crate::twitch_auth::{AuthError, AuthManager, TWITCH_CLIENT_ID};
+#[cfg(windows)]
+use tokio::sync::Notify;
 
 /// Supervisor timings. Defaults are production values; tests can override.
 #[derive(Debug, Clone)]
@@ -97,36 +99,32 @@ pub struct SidecarStatus {
 }
 
 /// Kicks off the supervisor. Returns immediately; the supervisor runs on
-/// a tauri async task until the app exits.
+/// a tauri async task until the app exits. The caller passes in the
+/// shared [`AuthManager`] (also held by Tauri managed state for the
+/// auth UI commands) and a `wakeup` notifier the supervisor awaits
+/// while idle in `waiting_for_auth` so a successful sign-in starts the
+/// sidecar within milliseconds instead of waiting out the 30 s poll.
 #[cfg(windows)]
-pub fn spawn<R: Runtime>(app: AppHandle<R>) {
+pub fn spawn<R: Runtime>(app: AppHandle<R>, auth: Arc<AuthManager>, wakeup: Arc<Notify>) {
     let cfg = SupervisorConfig::default();
     tauri::async_runtime::spawn(async move {
-        supervise(app, cfg).await;
+        supervise(app, cfg, auth, wakeup).await;
     });
 }
 
 #[cfg(windows)]
-async fn supervise<R: Runtime>(app: AppHandle<R>, cfg: SupervisorConfig) {
-    // `client_id` is a compile-time const (RFC 8252 public client; not a
-    // secret). The broadcaster/user identifiers ride inside the persisted
-    // [`TwitchTokens`] itself (populated from the DCF response, stable
-    // across refresh) so the supervisor never needs env vars or user
-    // input for them. Tokens live in the OS keychain, seeded via
+async fn supervise<R: Runtime>(
+    app: AppHandle<R>,
+    cfg: SupervisorConfig,
+    auth: Arc<AuthManager>,
+    wakeup: Arc<Notify>,
+) {
+    // `client_id` lives in the shared AuthManager; broadcaster/user
+    // identifiers ride inside the persisted [`TwitchTokens`] itself
+    // (populated from the DCF response, stable across refresh).
+    // Tokens live in the OS keychain, seeded via the SignIn overlay or
     // `cargo run --bin prismoid_dcf` and rotated automatically below
     // (ADR 29).
-    let http_client = match reqwest::Client::builder()
-        .redirect(reqwest::redirect::Policy::none())
-        .build()
-    {
-        Ok(c) => c,
-        Err(e) => {
-            tracing::error!(error = %e, "failed to build reqwest client; supervisor idling");
-            return;
-        }
-    };
-    let auth = AuthManager::builder(TWITCH_CLIENT_ID).build(KeychainStore, http_client);
-
     let mut attempt: u32 = 0;
     let mut backoff = cfg.initial_backoff;
 
@@ -140,14 +138,16 @@ async fn supervise<R: Runtime>(app: AppHandle<R>, cfg: SupervisorConfig) {
             Ok(t) => t,
             Err(AuthError::NoTokens) | Err(AuthError::RefreshTokenInvalid) => {
                 tracing::warn!(
-                    "no valid Twitch tokens in keychain; run `cargo run --bin prismoid_dcf` to seed"
+                    "no valid Twitch tokens in keychain; click Sign in with Twitch in the app"
                 );
                 emit_status(&app, "waiting_for_auth", attempt, None);
-                // Poll the keychain every 30 s so the user can seed
-                // mid-run without a restart. Not a respawn-pressure
-                // scenario, so we stay on a fixed interval rather than
-                // the exponential ladder.
-                tokio::time::sleep(Duration::from_secs(30)).await;
+                // Wait on the shared notifier (fired by
+                // `twitch_complete_login` / `twitch_logout`) with a 30 s
+                // floor so a process that boots before the keychain
+                // service still recovers without a restart. Not a
+                // respawn-pressure scenario, so we stay on a fixed
+                // interval rather than the exponential ladder.
+                let _ = tokio::time::timeout(Duration::from_secs(30), wakeup.notified()).await;
                 continue;
             }
             Err(e) => {
