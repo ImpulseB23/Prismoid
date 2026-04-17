@@ -56,6 +56,11 @@ pub struct SupervisorConfig {
     /// termination. Without this the ladder would only ever ratchet up,
     /// even if the sidecar was stable for hours between crashes.
     pub healthy_threshold: Duration,
+    /// Maximum gap between heartbeats from the sidecar before the
+    /// supervisor declares the child unhealthy and force-kills it to
+    /// trigger a respawn. `docs/stability.md` §Sidecar Health specifies
+    /// 3 missed heartbeats at a 1 s interval, so the default is 3 s.
+    pub heartbeat_timeout: Duration,
 }
 
 impl Default for SupervisorConfig {
@@ -64,6 +69,7 @@ impl Default for SupervisorConfig {
             initial_backoff: Duration::from_millis(250),
             max_backoff: Duration::from_secs(30),
             healthy_threshold: Duration::from_secs(60),
+            heartbeat_timeout: Duration::from_secs(3),
         }
     }
 }
@@ -165,7 +171,7 @@ async fn supervise<R: Runtime>(app: AppHandle<R>, cfg: SupervisorConfig) {
         };
 
         let started = Instant::now();
-        match run_once(&app, attempt, Some(&creds)).await {
+        match run_once(&app, &cfg, attempt, Some(&creds)).await {
             Ok(()) => tracing::info!(attempt, "sidecar iteration ended"),
             Err(e) => tracing::error!(error = %e, attempt, "sidecar iteration failed"),
         }
@@ -236,6 +242,7 @@ impl Drop for ChildGuard {
 #[cfg(windows)]
 async fn run_once<R: Runtime>(
     app: &AppHandle<R>,
+    cfg: &SupervisorConfig,
     attempt: u32,
     creds: Option<&TwitchCreds>,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -298,11 +305,12 @@ async fn run_once<R: Runtime>(
     }
 
     // Disarm the kill-on-drop: the CommandEvent stream now owns the
-    // child's lifecycle. Hold the released CommandChild in `_child` for
+    // child's lifecycle. Hold the released CommandChild in `child` for
     // the rest of the function so its stdin stays open for the duration
     // of the session (dropping it mid-session would close stdin and
-    // strand the control protocol).
-    let _child = child.release();
+    // strand the control protocol). It also lets us force-kill on a
+    // heartbeat timeout without waiting for Tauri's Drop path.
+    let child = child.release();
 
     // EmoteIndex lives for the lifetime of this sidecar run; a fresh one is
     // built on every respawn. Shared by the control-plane reader (which
@@ -320,29 +328,61 @@ async fn run_once<R: Runtime>(
 
     emit_status(app, "running", attempt, None);
 
-    while let Some(event) = rx.recv().await {
-        match event {
-            CommandEvent::Stdout(bytes) => {
-                handle_sidecar_stdout(&bytes, app, &emote_index);
+    // Heartbeat deadline tracking. The sidecar emits a heartbeat every
+    // 1 s (see `src-sidecar/internal/sidecar/sidecar.go::heartbeatPeriod`);
+    // if `cfg.heartbeat_timeout` elapses without one, the child is
+    // considered wedged and we force-kill it so the outer supervise loop
+    // respawns a fresh process. Initial deadline starts from bootstrap so
+    // a sidecar that never emits a first heartbeat still gets killed.
+    let mut last_heartbeat = Instant::now();
+    loop {
+        let deadline = last_heartbeat + cfg.heartbeat_timeout;
+        tokio::select! {
+            maybe_event = rx.recv() => {
+                let Some(event) = maybe_event else { break };
+                match event {
+                    CommandEvent::Stdout(bytes) => {
+                        if handle_sidecar_stdout(&bytes, app, &emote_index) {
+                            last_heartbeat = Instant::now();
+                        }
+                    }
+                    CommandEvent::Stderr(bytes) => {
+                        tracing::debug!(line = %String::from_utf8_lossy(&bytes), "sidecar stderr");
+                    }
+                    CommandEvent::Error(msg) => {
+                        // Transient stream error; the child may still be alive.
+                        // Log and keep reading until we see Terminated (or the
+                        // stream closes on its own).
+                        tracing::error!(error = %msg, attempt, "sidecar command stream error");
+                    }
+                    CommandEvent::Terminated(payload) => {
+                        tracing::warn!(code = ?payload.code, attempt, "sidecar terminated");
+                        break;
+                    }
+                    // `CommandEvent` is `#[non_exhaustive]` upstream. Any future
+                    // variant should at least surface at trace level instead of
+                    // silently disappearing.
+                    _ => {
+                        tracing::trace!(attempt, "unhandled sidecar command event variant");
+                    }
+                }
             }
-            CommandEvent::Stderr(bytes) => {
-                tracing::debug!(line = %String::from_utf8_lossy(&bytes), "sidecar stderr");
-            }
-            CommandEvent::Error(msg) => {
-                // Transient stream error; the child may still be alive.
-                // Log and keep reading until we see Terminated (or the
-                // stream closes on its own).
-                tracing::error!(error = %msg, attempt, "sidecar command stream error");
-            }
-            CommandEvent::Terminated(payload) => {
-                tracing::warn!(code = ?payload.code, attempt, "sidecar terminated");
+            _ = tokio::time::sleep_until(tokio::time::Instant::from_std(deadline)) => {
+                let gap_ms = last_heartbeat.elapsed().as_millis() as u64;
+                tracing::error!(
+                    attempt,
+                    gap_ms,
+                    timeout_ms = cfg.heartbeat_timeout.as_millis() as u64,
+                    "heartbeat timeout; killing sidecar to force respawn"
+                );
+                emit_status(app, "unhealthy", attempt, None);
+                if let Err(e) = child.kill() {
+                    tracing::error!(error = %e, "kill after heartbeat timeout failed");
+                }
+                // Fall through to drain the stream until Terminated arrives
+                // so the drain loop gets a clean shutdown and we don't leak
+                // the task.
                 break;
-            }
-            // `CommandEvent` is `#[non_exhaustive]` upstream. Any future
-            // variant should at least surface at trace level instead of
-            // silently disappearing.
-            _ => {
-                tracing::trace!(attempt, "unhandled sidecar command event variant");
             }
         }
     }
@@ -417,18 +457,23 @@ fn drain_and_emit<R: Runtime>(
 /// sidecar buffers multiple JSON objects per write, each object still
 /// parses independently. Empty pieces (trailing newline, blank lines) are
 /// skipped.
+///
+/// Returns `true` if at least one heartbeat was observed in this batch,
+/// which lets the supervisor reset the heartbeat-timeout deadline without
+/// re-parsing each line.
 #[cfg(windows)]
 fn handle_sidecar_stdout<R: Runtime>(
     bytes: &[u8],
     app: &AppHandle<R>,
     emote_index: &Arc<EmoteIndex>,
-) {
+) -> bool {
+    let mut saw_heartbeat = false;
     for line in bytes.split(|b| *b == b'\n') {
         if line.is_empty() {
             continue;
         }
         match parse_sidecar_event(line) {
-            SidecarEvent::Heartbeat => {}
+            SidecarEvent::Heartbeat => saw_heartbeat = true,
             SidecarEvent::EmoteBundle(bundle) => apply_emote_bundle(bundle, app, emote_index),
             SidecarEvent::Other(t) => {
                 tracing::debug!(msg_type = %t, "unhandled sidecar control message");
@@ -438,6 +483,7 @@ fn handle_sidecar_stdout<R: Runtime>(
             }
         }
     }
+    saw_heartbeat
 }
 
 /// Swaps a fresh [`EmoteBundle`] into the supervisor's [`EmoteIndex`] and
@@ -489,6 +535,9 @@ mod tests {
         assert_eq!(cfg.initial_backoff, Duration::from_millis(250));
         assert_eq!(cfg.max_backoff, Duration::from_secs(30));
         assert_eq!(cfg.healthy_threshold, Duration::from_secs(60));
+        // `docs/stability.md` §Sidecar Health: 3 missed heartbeats at
+        // 1 s interval triggers respawn.
+        assert_eq!(cfg.heartbeat_timeout, Duration::from_secs(3));
     }
 
     #[test]
