@@ -31,6 +31,12 @@ export interface SizeEmoteOptions {
 
 const FALLBACK_DIM = 28;
 
+// Hoisted to module scope: TextEncoder/TextDecoder are stateless and the
+// chat hot path calls splitMessage once per message, so reusing a single
+// pair avoids per-call allocation pressure.
+const utf8Encoder = new TextEncoder();
+const utf8Decoder = new TextDecoder();
+
 export function sizeEmote(
   emote: EmoteMeta,
   opts: SizeEmoteOptions,
@@ -54,13 +60,18 @@ export function splitMessage(
     return text.length === 0 ? [] : [{ kind: "text", text }];
   }
 
-  // Sort defensively; the scanner should already produce sorted spans but
-  // a stray unsorted input here would corrupt every downstream slice.
-  const sorted = [...spans].sort((a, b) => a.start - b.start);
+  // The Rust scanner emits spans in ascending start order. Verify in a
+  // single pass and only clone+sort on the rare violation; this keeps the
+  // common path at O(n) with zero extra allocations.
+  let sorted: EmoteSpan[] = spans;
+  for (let i = 1; i < spans.length; i++) {
+    if (spans[i]!.start < spans[i - 1]!.start) {
+      sorted = spans.slice().sort((a, b) => a.start - b.start);
+      break;
+    }
+  }
 
-  const encoder = new TextEncoder();
-  const decoder = new TextDecoder();
-  const bytes = encoder.encode(text);
+  const bytes = utf8Encoder.encode(text);
 
   const pieces: MessagePiece[] = [];
   let cursor = 0;
@@ -85,7 +96,7 @@ export function splitMessage(
         if (span.start > cursor) {
           pieces.push({
             kind: "text",
-            text: decoder.decode(bytes.subarray(cursor, span.start)),
+            text: utf8Decoder.decode(bytes.subarray(cursor, span.start)),
           });
         }
         prev.overlays.push(sized);
@@ -99,7 +110,7 @@ export function splitMessage(
     if (span.start > cursor) {
       pieces.push({
         kind: "text",
-        text: decoder.decode(bytes.subarray(cursor, span.start)),
+        text: utf8Decoder.decode(bytes.subarray(cursor, span.start)),
       });
     }
 
@@ -110,7 +121,7 @@ export function splitMessage(
   if (cursor < bytes.length) {
     pieces.push({
       kind: "text",
-      text: decoder.decode(bytes.subarray(cursor)),
+      text: utf8Decoder.decode(bytes.subarray(cursor)),
     });
   }
 
