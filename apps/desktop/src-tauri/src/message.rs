@@ -41,7 +41,6 @@ pub struct UnifiedMessage {
     /// Emote matches inside [`message_text`](Self::message_text), populated
     /// by [`crate::emote_index::EmoteIndex::scan_into`] after parsing.
     /// Empty when no index is active or the message has no emotes.
-    #[serde(default)]
     pub emote_spans: Vec<EmoteSpan>,
 }
 

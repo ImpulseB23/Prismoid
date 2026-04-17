@@ -17,6 +17,17 @@ export interface EmoteMeta {
   zero_width: boolean;
 }
 
+/**
+ * One scanned emote occurrence inside `ChatMessage.message_text`.
+ *
+ * `start` and `end` are **UTF-8 byte offsets** as produced by the Rust
+ * scanner, not UTF-16 code-unit offsets. JavaScript string indexing
+ * (`String.prototype.slice`, `[]`, etc.) operates on UTF-16, so renderers
+ * that splice the message around emote spans must translate first. The
+ * straightforward way is to encode `message_text` once with `TextEncoder`
+ * and slice the resulting `Uint8Array`, decoding each segment with
+ * `TextDecoder`. For ASCII-only messages the two are equivalent.
+ */
 export interface EmoteSpan {
   start: number;
   end: number;
