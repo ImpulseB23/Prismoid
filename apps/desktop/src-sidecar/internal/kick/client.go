@@ -29,8 +29,9 @@ type Notify func(msgType string, payload any)
 // raw Pusher event bytes (tagged with control.TagKick) to a shared channel.
 // Follows the same lifecycle pattern as the Twitch EventSub client.
 type Client struct {
-	ChatroomID int
-	WSURL      string // override for testing; "" uses default
+	ChatroomID  int
+	WSURL       string        // override for testing; "" uses default
+	PongTimeout time.Duration // override for testing; 0 uses default (30s)
 
 	Out    chan<- []byte
 	Log    zerolog.Logger
@@ -143,73 +144,104 @@ func (c *Client) subscribe(ctx context.Context, conn *websocket.Conn) error {
 
 func (c *Client) listenLoop(ctx context.Context, conn *websocket.Conn, activityTimeoutSec int) error {
 	pingInterval := time.Duration(activityTimeoutSec) * time.Second
-	pongTimeout := 30 * time.Second
-	waitingForPong := false
-
-	readDeadline := func() time.Duration {
-		if waitingForPong {
-			return pongTimeout
-		}
-		return pingInterval
+	pongTimeout := c.PongTimeout
+	if pongTimeout == 0 {
+		pongTimeout = 30 * time.Second
 	}
 
-	for {
-		readCtx, cancel := context.WithTimeout(ctx, readDeadline())
-		_, data, err := conn.Read(readCtx)
-		cancel()
-		if err != nil {
-			if errors.Is(err, context.Canceled) && ctx.Err() != nil {
-				_ = conn.Close(websocket.StatusNormalClosure, "shutting down")
-				return ctx.Err()
+	type readResult struct {
+		data []byte
+		err  error
+	}
+
+	// Read goroutine: reads messages and sends them to results.
+	// Exits when conn is closed (via deferred CloseNow) or ctx is cancelled.
+	results := make(chan readResult, 1)
+	loopDone := make(chan struct{})
+	defer close(loopDone)
+	defer func() { _ = conn.CloseNow() }()
+
+	go func() {
+		for {
+			_, data, err := conn.Read(ctx)
+			select {
+			case results <- readResult{data, err}:
+			case <-loopDone:
+				return
 			}
-			if errors.Is(err, context.DeadlineExceeded) && ctx.Err() == nil {
-				if waitingForPong {
-					return fmt.Errorf("pong timeout after %s", pongTimeout)
+			if err != nil {
+				return
+			}
+		}
+	}()
+
+	timer := time.NewTimer(pingInterval)
+	defer timer.Stop()
+	waitingForPong := false
+
+	for {
+		select {
+		case r := <-results:
+			if r.err != nil {
+				if ctx.Err() != nil {
+					return ctx.Err()
 				}
-				if err := c.sendPing(ctx, conn); err != nil {
-					return err
+				return fmt.Errorf("read: %w", r.err)
+			}
+
+			if !timer.Stop() {
+				select {
+				case <-timer.C:
+				default:
 				}
-				waitingForPong = true
+			}
+			timer.Reset(pingInterval)
+			waitingForPong = false
+
+			var ev PusherEvent
+			if err := json.Unmarshal(r.data, &ev); err != nil {
+				c.Log.Error().Err(err).Msg("unmarshal pusher event failed")
 				continue
 			}
-			return fmt.Errorf("read: %w", err)
-		}
 
-		var ev PusherEvent
-		if err := json.Unmarshal(data, &ev); err != nil {
-			c.Log.Error().Err(err).Msg("unmarshal pusher event failed")
-			continue
-		}
+			switch {
+			case ev.Event == "pusher:ping":
+				if err := c.sendPong(ctx, conn); err != nil {
+					return err
+				}
 
-		waitingForPong = false
+			case ev.Event == "pusher:pong":
+				// pong received, waitingForPong already cleared above
 
-		switch {
-		case ev.Event == "pusher:ping":
-			if err := c.sendPong(ctx, conn); err != nil {
+			case ev.Event == "pusher:error":
+				c.Log.Warn().Str("data", ev.Data).Msg("pusher error")
+
+			case ev.Event == "pusher_internal:subscription_succeeded":
+				// no-op
+
+			case ev.Channel != "":
+				tagged := make([]byte, 1+len(r.data))
+				tagged[0] = control.TagKick
+				copy(tagged[1:], r.data)
+				select {
+				case c.Out <- tagged:
+				default:
+					c.Log.Warn().Msg("output channel full, dropping message")
+				}
+
+			default:
+				c.Log.Debug().Str("event", ev.Event).Msg("unhandled pusher event")
+			}
+
+		case <-timer.C:
+			if waitingForPong {
+				return fmt.Errorf("pong timeout after %s", pongTimeout)
+			}
+			if err := c.sendPing(ctx, conn); err != nil {
 				return err
 			}
-
-		case ev.Event == "pusher:pong":
-			// pong received, waitingForPong already cleared above
-
-		case ev.Event == "pusher:error":
-			c.Log.Warn().Str("data", ev.Data).Msg("pusher error")
-
-		case ev.Event == "pusher_internal:subscription_succeeded":
-			// no-op
-
-		case ev.Channel != "":
-			tagged := make([]byte, 1+len(data))
-			tagged[0] = control.TagKick
-			copy(tagged[1:], data)
-			select {
-			case c.Out <- tagged:
-			default:
-				c.Log.Warn().Msg("output channel full, dropping message")
-			}
-
-		default:
-			c.Log.Debug().Str("event", ev.Event).Msg("unhandled pusher event")
+			waitingForPong = true
+			timer.Reset(pongTimeout)
 		}
 	}
 }

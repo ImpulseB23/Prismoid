@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -51,11 +52,12 @@ func pusherPingMsg() []byte {
 
 func newTestClient(wsURL string, chatroomID int, out chan<- []byte) *Client {
 	return &Client{
-		ChatroomID: chatroomID,
-		WSURL:      wsURL,
-		Out:        out,
-		Log:        zerolog.Nop(),
-		Notify:     func(string, any) {},
+		ChatroomID:  chatroomID,
+		WSURL:       wsURL,
+		PongTimeout: 0, // default 30s
+		Out:         out,
+		Log:         zerolog.Nop(),
+		Notify:      func(string, any) {},
 	}
 }
 
@@ -277,5 +279,180 @@ func TestIsFatalClose(t *testing.T) {
 				t.Errorf("isFatalClose(%d) = %v, want %v", tt.code, got, tt.fatal)
 			}
 		})
+	}
+}
+
+func TestClientSendsPingOnIdle(t *testing.T) {
+	var receivedPing bool
+
+	wsSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := websocket.Accept(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer func() { _ = conn.CloseNow() }()
+
+		ctx := context.Background()
+		// activity_timeout=1 so the client pings after 1s of idle
+		_ = conn.Write(ctx, websocket.MessageText, connectionEstablishedMsg(1))
+		_, _, _ = conn.Read(ctx) // subscribe
+		_ = conn.Write(ctx, websocket.MessageText, subscriptionSucceededMsg("chatrooms.500.v2"))
+
+		// wait for the client-initiated ping
+		readCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
+		defer cancel()
+		_, data, err := conn.Read(readCtx)
+		if err == nil {
+			var ev PusherEvent
+			if json.Unmarshal(data, &ev) == nil && ev.Event == "pusher:ping" {
+				receivedPing = true
+			}
+		}
+
+		// respond with pong then close
+		pong, _ := json.Marshal(PusherEvent{Event: "pusher:pong", Data: "{}"})
+		_ = conn.Write(ctx, websocket.MessageText, pong)
+		time.Sleep(50 * time.Millisecond)
+		_ = conn.Close(websocket.StatusNormalClosure, "done")
+	}))
+	defer wsSrv.Close()
+
+	out := make(chan []byte, 16)
+	client := newTestClient("ws"+strings.TrimPrefix(wsSrv.URL, "http"), 500, out)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	_ = client.Run(ctx)
+
+	if !receivedPing {
+		t.Fatal("expected client to send pusher:ping after idle timeout")
+	}
+}
+
+func TestClientPongTimeout(t *testing.T) {
+	var connectCount atomic.Int32
+
+	wsSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		connectCount.Add(1)
+		conn, err := websocket.Accept(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer func() { _ = conn.CloseNow() }()
+
+		ctx := context.Background()
+		// activity_timeout=1 so client pings after 1s
+		_ = conn.Write(ctx, websocket.MessageText, connectionEstablishedMsg(1))
+		_, _, _ = conn.Read(ctx) // subscribe
+		_ = conn.Write(ctx, websocket.MessageText, subscriptionSucceededMsg("chatrooms.600.v2"))
+
+		// read the ping but do NOT respond with pong
+		readCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+		defer cancel()
+		_, _, _ = conn.Read(readCtx)
+
+		<-readCtx.Done()
+	}))
+	defer wsSrv.Close()
+
+	out := make(chan []byte, 16)
+	client := &Client{
+		ChatroomID:  600,
+		WSURL:       "ws" + strings.TrimPrefix(wsSrv.URL, "http"),
+		PongTimeout: 1 * time.Second,
+		Out:         out,
+		Log:         zerolog.Nop(),
+		Notify:      func(string, any) {},
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	_ = client.Run(ctx)
+
+	// pong timeout (1s) + activity_timeout (1s) + backoff = ~3s per cycle.
+	// With 5s context, we should see at least 2 connections.
+	if connectCount.Load() < 2 {
+		t.Fatalf("expected at least 2 connections (pong timeout triggers reconnect), got %d", connectCount.Load())
+	}
+}
+
+func TestClientPusherErrorEvent(t *testing.T) {
+	wsSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := websocket.Accept(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer func() { _ = conn.CloseNow() }()
+
+		ctx := context.Background()
+		_ = conn.Write(ctx, websocket.MessageText, connectionEstablishedMsg(120))
+		_, _, _ = conn.Read(ctx) // subscribe
+		_ = conn.Write(ctx, websocket.MessageText, subscriptionSucceededMsg("chatrooms.700.v2"))
+
+		errorEv, _ := json.Marshal(PusherEvent{Event: "pusher:error", Data: `{"code":4201,"message":"rate limit"}`})
+		_ = conn.Write(ctx, websocket.MessageText, errorEv)
+
+		// send a normal message after the error to verify the client keeps running
+		_ = conn.Write(ctx, websocket.MessageText, chatMessageEvent("msg-1", "after error", "user1", 700))
+
+		time.Sleep(100 * time.Millisecond)
+		_ = conn.Close(websocket.StatusNormalClosure, "done")
+	}))
+	defer wsSrv.Close()
+
+	out := make(chan []byte, 16)
+	client := newTestClient("ws"+strings.TrimPrefix(wsSrv.URL, "http"), 700, out)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	_ = client.Run(ctx)
+
+	msgs := drainChan(out)
+	if len(msgs) < 1 {
+		t.Fatal("expected message after pusher:error event")
+	}
+}
+
+func TestClientDropsMessageOnFullChannel(t *testing.T) {
+	wsSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := websocket.Accept(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer func() { _ = conn.CloseNow() }()
+
+		ctx := context.Background()
+		_ = conn.Write(ctx, websocket.MessageText, connectionEstablishedMsg(120))
+		_, _, _ = conn.Read(ctx) // subscribe
+		_ = conn.Write(ctx, websocket.MessageText, subscriptionSucceededMsg("chatrooms.800.v2"))
+
+		// send more messages than the channel can hold
+		for i := 0; i < 5; i++ {
+			_ = conn.Write(ctx, websocket.MessageText, chatMessageEvent(
+				fmt.Sprintf("msg-%d", i), "overflow", "user1", 800,
+			))
+		}
+
+		time.Sleep(100 * time.Millisecond)
+		_ = conn.Close(websocket.StatusNormalClosure, "done")
+	}))
+	defer wsSrv.Close()
+
+	// channel with capacity 1 so messages get dropped
+	out := make(chan []byte, 1)
+	client := newTestClient("ws"+strings.TrimPrefix(wsSrv.URL, "http"), 800, out)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	_ = client.Run(ctx)
+
+	// at least one should have been received, but not all 5
+	msgs := drainChan(out)
+	if len(msgs) == 0 {
+		t.Fatal("expected at least one message")
 	}
 }
