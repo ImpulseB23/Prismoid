@@ -8,9 +8,6 @@ use crate::emote_index::EmoteSpan;
 #[derive(Debug, Clone, Serialize)]
 pub enum Platform {
     Twitch,
-    // Constructed by platform parsers landing in follow-up tickets. Kept here
-    // so the frontend's discriminated union stays the single source of truth.
-    #[allow(dead_code)]
     YouTube,
     #[allow(dead_code)]
     Kick,
@@ -203,6 +200,114 @@ pub fn parse_twitch_envelope(bytes: &[u8]) -> Result<Option<UnifiedMessage>, Par
         is_broadcaster,
         color: event.color,
         reply_to: event.reply.map(|r| r.parent_message_id),
+        emote_spans: Vec::new(),
+    }))
+}
+
+// --- YouTube protojson deserialization types (private, narrow) ---
+
+#[derive(Debug, Deserialize)]
+struct YouTubeMessage {
+    #[serde(default)]
+    id: Option<String>,
+    #[serde(default)]
+    snippet: Option<YouTubeSnippet>,
+    #[serde(default)]
+    author_details: Option<YouTubeAuthorDetails>,
+}
+
+#[derive(Debug, Deserialize)]
+struct YouTubeSnippet {
+    #[serde(default, rename = "type")]
+    msg_type: Option<String>,
+    #[serde(default)]
+    published_at: Option<String>,
+    #[serde(default)]
+    display_message: Option<String>,
+    #[serde(default)]
+    text_message_details: Option<YouTubeTextDetails>,
+}
+
+#[derive(Debug, Deserialize)]
+struct YouTubeTextDetails {
+    #[serde(default)]
+    message_text: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct YouTubeAuthorDetails {
+    #[serde(default)]
+    channel_id: Option<String>,
+    #[serde(default)]
+    display_name: Option<String>,
+    #[serde(default)]
+    is_chat_owner: Option<bool>,
+    #[serde(default)]
+    is_chat_moderator: Option<bool>,
+    #[serde(default)]
+    is_chat_sponsor: Option<bool>,
+}
+
+/// Parses a protojson-serialized YouTube `LiveChatMessage` into a
+/// [`UnifiedMessage`]. Returns `Ok(None)` for non-text message types
+/// (super chats, bans, etc. are future work).
+pub fn parse_youtube_message(bytes: &[u8]) -> Result<Option<UnifiedMessage>, ParseError> {
+    let msg: YouTubeMessage = serde_json::from_slice(bytes)?;
+
+    let snippet = match msg.snippet {
+        Some(s) => s,
+        None => return Ok(None),
+    };
+
+    // Only handle text messages for now
+    let msg_type = snippet.msg_type.as_deref().unwrap_or("");
+    if msg_type != "TEXT_MESSAGE_EVENT" {
+        return Ok(None);
+    }
+
+    let text = snippet
+        .text_message_details
+        .and_then(|d| d.message_text)
+        .or(snippet.display_message)
+        .unwrap_or_default();
+
+    let author = msg.author_details.unwrap_or(YouTubeAuthorDetails {
+        channel_id: None,
+        display_name: None,
+        is_chat_owner: None,
+        is_chat_moderator: None,
+        is_chat_sponsor: None,
+    });
+
+    let is_broadcaster = author.is_chat_owner.unwrap_or(false);
+    let is_mod = is_broadcaster || author.is_chat_moderator.unwrap_or(false);
+    let is_subscriber = author.is_chat_sponsor.unwrap_or(false);
+
+    let timestamp = snippet
+        .published_at
+        .as_deref()
+        .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+        .map(|dt| dt.timestamp_millis())
+        .unwrap_or_else(|| chrono::Utc::now().timestamp_millis());
+
+    let channel_id = author.channel_id.unwrap_or_default();
+    let display_name = author.display_name.unwrap_or_default();
+
+    Ok(Some(UnifiedMessage {
+        id: msg.id.unwrap_or_default(),
+        platform: Platform::YouTube,
+        timestamp,
+        arrival_time: chrono::Utc::now().timestamp_millis(),
+        username: channel_id.clone(),
+        display_name,
+        platform_user_id: channel_id,
+        message_text: text,
+        badges: Vec::new(),
+        is_mod,
+        is_subscriber,
+        is_broadcaster,
+        color: None,
+        reply_to: None,
         emote_spans: Vec::new(),
     }))
 }
@@ -418,5 +523,125 @@ mod tests {
         let err = parse_twitch_envelope(b"}{").unwrap_err();
         let _ = err.to_string();
         assert!(std::error::Error::source(&err).is_some());
+    }
+
+    // --- YouTube parser tests ---
+
+    const YT_TEXT_MSG: &[u8] = br##"{
+        "id": "yt-msg-1",
+        "snippet": {
+            "type": "TEXT_MESSAGE_EVENT",
+            "live_chat_id": "chat123",
+            "author_channel_id": "UC_abc",
+            "published_at": "2024-06-15T12:30:00Z",
+            "has_display_content": true,
+            "display_message": "hello youtube",
+            "text_message_details": {
+                "message_text": "hello youtube"
+            }
+        },
+        "author_details": {
+            "channel_id": "UC_abc",
+            "display_name": "TestViewer",
+            "is_verified": false,
+            "is_chat_owner": false,
+            "is_chat_sponsor": false,
+            "is_chat_moderator": false
+        }
+    }"##;
+
+    const YT_OWNER_MSG: &[u8] = br##"{
+        "id": "yt-msg-2",
+        "snippet": {
+            "type": "TEXT_MESSAGE_EVENT",
+            "published_at": "2024-06-15T12:31:00Z",
+            "text_message_details": { "message_text": "welcome all" }
+        },
+        "author_details": {
+            "channel_id": "UC_owner",
+            "display_name": "Streamer",
+            "is_chat_owner": true,
+            "is_chat_moderator": false,
+            "is_chat_sponsor": false
+        }
+    }"##;
+
+    const YT_MOD_MSG: &[u8] = br##"{
+        "id": "yt-msg-3",
+        "snippet": {
+            "type": "TEXT_MESSAGE_EVENT",
+            "published_at": "2024-06-15T12:32:00Z",
+            "text_message_details": { "message_text": "calm down chat" }
+        },
+        "author_details": {
+            "channel_id": "UC_mod",
+            "display_name": "ModUser",
+            "is_chat_owner": false,
+            "is_chat_moderator": true,
+            "is_chat_sponsor": true
+        }
+    }"##;
+
+    const YT_SUPER_CHAT: &[u8] = br##"{
+        "id": "yt-sc-1",
+        "snippet": {
+            "type": "SUPER_CHAT_EVENT",
+            "published_at": "2024-06-15T12:33:00Z",
+            "display_message": "$5.00",
+            "super_chat_details": { "amount_micros": 5000000, "currency": "USD" }
+        },
+        "author_details": {
+            "channel_id": "UC_donor",
+            "display_name": "BigDonor"
+        }
+    }"##;
+
+    #[test]
+    fn parses_youtube_text_message() {
+        let msg = parse_youtube_message(YT_TEXT_MSG).unwrap().unwrap();
+        assert_eq!(msg.id, "yt-msg-1");
+        assert!(matches!(msg.platform, Platform::YouTube));
+        assert_eq!(msg.display_name, "TestViewer");
+        assert_eq!(msg.platform_user_id, "UC_abc");
+        assert_eq!(msg.message_text, "hello youtube");
+        assert!(!msg.is_mod);
+        assert!(!msg.is_subscriber);
+        assert!(!msg.is_broadcaster);
+        assert!(msg.color.is_none());
+        assert!(msg.timestamp > 0);
+    }
+
+    #[test]
+    fn youtube_owner_implies_mod() {
+        let msg = parse_youtube_message(YT_OWNER_MSG).unwrap().unwrap();
+        assert!(msg.is_broadcaster);
+        assert!(msg.is_mod);
+        assert_eq!(msg.display_name, "Streamer");
+    }
+
+    #[test]
+    fn youtube_moderator_flags() {
+        let msg = parse_youtube_message(YT_MOD_MSG).unwrap().unwrap();
+        assert!(msg.is_mod);
+        assert!(msg.is_subscriber); // is_chat_sponsor maps to subscriber
+        assert!(!msg.is_broadcaster);
+    }
+
+    #[test]
+    fn youtube_non_text_returns_none() {
+        let result = parse_youtube_message(YT_SUPER_CHAT).unwrap();
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn youtube_malformed_json_returns_err() {
+        let err = parse_youtube_message(b"not json").unwrap_err();
+        assert!(matches!(err, ParseError::Json(_)));
+    }
+
+    #[test]
+    fn youtube_missing_snippet_returns_none() {
+        let msg = br#"{"id":"x","author_details":{"channel_id":"c","display_name":"d"}}"#;
+        assert!(parse_youtube_message(msg).unwrap().is_none());
     }
 }

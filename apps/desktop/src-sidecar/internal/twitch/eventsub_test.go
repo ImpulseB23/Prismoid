@@ -107,7 +107,11 @@ func TestClientReceivesNotifications(t *testing.T) {
 	}
 
 	var env Envelope
-	if err := json.Unmarshal(msgs[0], &env); err != nil {
+	raw := msgs[0]
+	if len(raw) > 0 && raw[0] == 0x01 {
+		raw = raw[1:]
+	}
+	if err := json.Unmarshal(raw, &env); err != nil {
 		t.Fatalf("unmarshal first message: %v", err)
 	}
 	if env.Metadata.MessageType != "notification" {

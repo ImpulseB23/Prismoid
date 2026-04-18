@@ -1,5 +1,12 @@
 package control
 
+// Platform tag bytes prepended to each ring-buffer payload so the Rust host
+// can dispatch to the correct parser without inspecting the JSON body.
+const (
+	TagTwitch  byte = 0x01
+	TagYouTube byte = 0x03
+)
+
 // Bootstrap is the first message the Rust host writes to the sidecar's stdin
 // at startup. It hands over the inherited shared memory section so the sidecar
 // can attach without having to know a name or open a kernel object by lookup.
@@ -42,6 +49,11 @@ type Command struct {
 	DurationSeconds int    `json:"duration_seconds,omitempty"`
 	Reason          string `json:"reason,omitempty"`
 	MessageID       string `json:"message_id,omitempty"`
+
+	// YouTube fields
+	VideoID    string `json:"video_id,omitempty"`
+	LiveChatID string `json:"live_chat_id,omitempty"`
+	APIKey     string `json:"api_key,omitempty"`
 }
 
 // Message is a notification the sidecar writes to stdout for the Rust host.

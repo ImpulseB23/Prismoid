@@ -55,9 +55,13 @@ Google OAuth 2.0. YouTube Live Streaming API scope. Single app-level Google Clou
 
 ### Chat (read)
 
-gRPC `liveChatMessages.streamList` - server-streaming RPC. Not REST polling. This keeps quota usage low and latency minimal.
+gRPC `liveChatMessages.streamList` (service `V3DataLiveChatMessageService` at `youtube.googleapis.com:443`) - server-streaming RPC. Not REST polling. This keeps quota usage low and latency minimal.
 
-The Go sidecar maintains the gRPC stream and writes raw protobuf bytes to the ring buffer.
+Requires a `liveChatId` obtained from `videos.list` (field `liveStreamingDetails.activeLiveChatId`). Supports API key auth for read-only access and OAuth 2.0 Bearer tokens for authenticated access.
+
+The Go sidecar maintains the gRPC stream, marshals each `LiveChatMessage` to JSON via `protojson`, prepends the `0x03` platform tag, and writes to the ring buffer. The Rust host dispatches tagged payloads to `parse_youtube_message()`.
+
+Proto definition: `apps/desktop/src-sidecar/proto/stream_list.proto` (from Google's official streaming-live-chat docs).
 
 ### Chat (write)
 

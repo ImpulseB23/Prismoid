@@ -12,7 +12,7 @@ use std::time::Duration;
 use serde::Serialize;
 
 use crate::emote_index::{EmoteBundle, EmoteIndex};
-use crate::message::{parse_twitch_envelope, UnifiedMessage};
+use crate::message::{parse_twitch_envelope, parse_youtube_message, UnifiedMessage};
 use crate::ringbuf::RawHandle;
 
 /// Timeout for [`ringbuf::RingBufReader::wait_for_signal`] in the host drain
@@ -41,6 +41,10 @@ pub struct TwitchCreds {
 /// The caller is responsible for clearing the scratch between drain ticks;
 /// this function only appends.
 ///
+/// Each payload is prefixed with a 1-byte platform tag (0x01 = Twitch,
+/// 0x03 = YouTube). The tag determines which parser is invoked on the
+/// remaining bytes.
+///
 /// Each successful parse is scanned for emotes against `emote_index`. The
 /// scan is cheap when the index is empty (no automaton, early return) so
 /// passing a fresh index is fine in tests and during the gap before
@@ -52,10 +56,28 @@ pub struct TwitchCreds {
 /// Messages that fail to parse or that aren't chat notifications are dropped
 /// with a log. Each parse is wrapped in `catch_unwind` so a panicking parser
 /// cannot kill the drain loop (`docs/stability.md` §Rust Panic Handling).
+const TAG_TWITCH: u8 = 0x01;
+const TAG_YOUTUBE: u8 = 0x03;
+
 pub fn parse_batch(raw: &[Vec<u8>], batch: &mut Vec<UnifiedMessage>, emote_index: &EmoteIndex) {
     for payload in raw {
         let slice = payload.as_slice();
-        let outcome = std::panic::catch_unwind(|| parse_twitch_envelope(slice));
+        if slice.is_empty() {
+            continue;
+        }
+
+        let tag = slice[0];
+        let body = &slice[1..];
+
+        let outcome = std::panic::catch_unwind(|| match tag {
+            TAG_TWITCH => parse_twitch_envelope(body),
+            TAG_YOUTUBE => parse_youtube_message(body),
+            _ => {
+                tracing::warn!(tag, "unknown platform tag, dropping message");
+                Ok(None)
+            }
+        });
+
         match outcome {
             Ok(Ok(Some(mut msg))) => {
                 emote_index.scan_into(&msg.message_text, &mut msg.emote_spans);
@@ -112,6 +134,32 @@ pub fn build_twitch_connect_line(creds: &TwitchCreds) -> serde_json::Result<Vec<
         token: &creds.access_token,
         broadcaster_id: &creds.broadcaster_id,
         user_id: &creds.user_id,
+    };
+    let mut bytes = serde_json::to_vec(&cmd)?;
+    bytes.push(b'\n');
+    Ok(bytes)
+}
+
+/// YouTube credentials sourced from environment variables for Phase 0 dev.
+#[derive(Debug, Clone)]
+pub struct YouTubeCreds {
+    pub api_key: String,
+    pub live_chat_id: String,
+}
+
+/// Serializes a `youtube_connect` control command line for the sidecar.
+#[allow(dead_code)]
+pub fn build_youtube_connect_line(creds: &YouTubeCreds) -> serde_json::Result<Vec<u8>> {
+    #[derive(Serialize)]
+    struct ConnectCmd<'a> {
+        cmd: &'a str,
+        api_key: &'a str,
+        live_chat_id: &'a str,
+    }
+    let cmd = ConnectCmd {
+        cmd: "youtube_connect",
+        api_key: &creds.api_key,
+        live_chat_id: &creds.live_chat_id,
     };
     let mut bytes = serde_json::to_vec(&cmd)?;
     bytes.push(b'\n');
@@ -227,6 +275,7 @@ pub fn parse_sidecar_event(bytes: &[u8]) -> SidecarEvent {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::message::Platform;
 
     #[test]
     fn bootstrap_line_has_expected_fields_and_newline() {
@@ -258,9 +307,23 @@ mod tests {
         assert_eq!(parsed["user_id"], "uid");
     }
 
+    fn tag_twitch(json: &[u8]) -> Vec<u8> {
+        let mut v = Vec::with_capacity(1 + json.len());
+        v.push(TAG_TWITCH);
+        v.extend_from_slice(json);
+        v
+    }
+
+    fn tag_youtube(json: &[u8]) -> Vec<u8> {
+        let mut v = Vec::with_capacity(1 + json.len());
+        v.push(TAG_YOUTUBE);
+        v.extend_from_slice(json);
+        v
+    }
+
     #[test]
     fn parse_batch_filters_non_chat_and_parse_errors() {
-        let viewer = br##"{
+        let viewer = tag_twitch(br##"{
             "metadata": {"message_id":"m","message_type":"notification","message_timestamp":"2023-11-06T18:11:47.492Z"},
             "payload": {
                 "subscription": {"type":"channel.chat.message"},
@@ -269,9 +332,9 @@ mod tests {
                     "message_id":"mid","message":{"text":"hi"}
                 }
             }
-        }"##.to_vec();
-        let keepalive = br##"{"metadata":{"message_id":"ka","message_type":"session_keepalive","message_timestamp":"2023-11-06T18:11:49.000Z"},"payload":{}}"##.to_vec();
-        let junk = b"not json".to_vec();
+        }"##);
+        let keepalive = tag_twitch(br##"{"metadata":{"message_id":"ka","message_type":"session_keepalive","message_timestamp":"2023-11-06T18:11:49.000Z"},"payload":{}}"##);
+        let junk = tag_twitch(b"not json");
 
         let raw = vec![viewer, keepalive, junk];
         let mut batch = Vec::new();
@@ -292,10 +355,7 @@ mod tests {
 
     #[test]
     fn parse_batch_appends_to_existing_scratch() {
-        // Verifies that parse_batch appends rather than clearing. The drain
-        // loop owns clearing between ticks; this lets the loop avoid any
-        // allocation churn on the hot path.
-        let viewer = br##"{
+        let viewer = tag_twitch(br##"{
             "metadata": {"message_id":"m","message_type":"notification","message_timestamp":"2023-11-06T18:11:47.492Z"},
             "payload": {
                 "subscription": {"type":"channel.chat.message"},
@@ -304,7 +364,7 @@ mod tests {
                     "message_id":"mid","message":{"text":"second"}
                 }
             }
-        }"##.to_vec();
+        }"##);
 
         let mut batch = Vec::new();
         let idx = EmoteIndex::new();
@@ -323,7 +383,7 @@ mod tests {
     fn parse_batch_attaches_emote_spans_from_index() {
         use crate::emote_index::{EmoteMeta, Provider};
 
-        let viewer = br##"{
+        let viewer = tag_twitch(br##"{
             "metadata": {"message_id":"m","message_type":"notification","message_timestamp":"2023-11-06T18:11:47.492Z"},
             "payload": {
                 "subscription": {"type":"channel.chat.message"},
@@ -332,7 +392,7 @@ mod tests {
                     "message_id":"mid","message":{"text":"hello Kappa world"}
                 }
             }
-        }"##.to_vec();
+        }"##);
 
         let idx = EmoteIndex::new();
         idx.load([EmoteMeta {
@@ -356,6 +416,53 @@ mod tests {
         assert_eq!(span.start, 6);
         assert_eq!(span.end, 11);
         assert_eq!(span.emote.code.as_ref(), "Kappa");
+    }
+
+    #[test]
+    fn parse_batch_routes_youtube_messages() {
+        let yt_msg = tag_youtube(br##"{"id":"yt-1","snippet":{"type":"TEXT_MESSAGE_EVENT","published_at":"2024-01-01T00:00:00Z","display_message":"hello from yt","text_message_details":{"message_text":"hello from yt"}},"author_details":{"channel_id":"UC123","display_name":"YTUser","is_chat_owner":false,"is_chat_moderator":false,"is_chat_sponsor":false}}"##);
+
+        let mut batch = Vec::new();
+        let idx = EmoteIndex::new();
+        parse_batch(std::slice::from_ref(&yt_msg), &mut batch, &idx);
+        assert_eq!(batch.len(), 1);
+        assert_eq!(batch[0].message_text, "hello from yt");
+        assert!(matches!(batch[0].platform, Platform::YouTube));
+        assert_eq!(batch[0].display_name, "YTUser");
+    }
+
+    #[test]
+    fn parse_batch_mixed_platforms() {
+        let twitch = tag_twitch(br##"{"metadata":{"message_id":"m","message_type":"notification","message_timestamp":"2023-11-06T18:11:47.492Z"},"payload":{"subscription":{"type":"channel.chat.message"},"event":{"chatter_user_id":"1","chatter_user_login":"u","chatter_user_name":"U","message_id":"mid","message":{"text":"from twitch"}}}}"##);
+        let yt = tag_youtube(br##"{"id":"yt-1","snippet":{"type":"TEXT_MESSAGE_EVENT","published_at":"2024-01-01T00:00:00Z","text_message_details":{"message_text":"from youtube"}},"author_details":{"channel_id":"UC1","display_name":"YT"}}"##);
+
+        let raw = vec![twitch, yt];
+        let mut batch = Vec::new();
+        let idx = EmoteIndex::new();
+        parse_batch(&raw, &mut batch, &idx);
+        assert_eq!(batch.len(), 2);
+        assert!(matches!(batch[0].platform, Platform::Twitch));
+        assert!(matches!(batch[1].platform, Platform::YouTube));
+    }
+
+    #[test]
+    fn parse_batch_skips_empty_payloads() {
+        let raw = vec![vec![]];
+        let mut batch = Vec::new();
+        let idx = EmoteIndex::new();
+        parse_batch(&raw, &mut batch, &idx);
+        assert!(batch.is_empty());
+    }
+
+    #[test]
+    fn parse_batch_unknown_tag_dropped() {
+        let mut payload = vec![0xFF];
+        payload.extend_from_slice(b"{}");
+        let raw = vec![payload];
+        let mut batch = Vec::new();
+        let idx = EmoteIndex::new();
+        parse_batch(&raw, &mut batch, &idx);
+        assert!(batch.is_empty());
     }
 
     #[cfg(windows)]

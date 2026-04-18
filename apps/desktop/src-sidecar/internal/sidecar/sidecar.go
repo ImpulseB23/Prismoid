@@ -24,6 +24,7 @@ import (
 	"github.com/ImpulseB23/Prismoid/sidecar/internal/emotes"
 	"github.com/ImpulseB23/Prismoid/sidecar/internal/ringbuf"
 	"github.com/ImpulseB23/Prismoid/sidecar/internal/twitch"
+	"github.com/ImpulseB23/Prismoid/sidecar/internal/youtube"
 )
 
 const (
@@ -269,6 +270,10 @@ func DispatchCommand(ctx context.Context, cmd control.Command, clients map[strin
 		HandleTwitchConnect(ctx, cmd, clients, out, notify, logger)
 	case "twitch_disconnect":
 		HandleTwitchDisconnect(cmd, clients, logger)
+	case "youtube_connect":
+		HandleYouTubeConnect(ctx, cmd, clients, out, notify, logger)
+	case "youtube_disconnect":
+		HandleYouTubeDisconnect(cmd, clients, logger)
 	case "ban_user":
 		HandleBanUser(cmd, logger)
 	case "unban_user":
@@ -497,6 +502,62 @@ func HandleTwitchDisconnect(cmd control.Command, clients map[string]context.Canc
 	cancelFn()
 	delete(clients, cmd.BroadcasterID)
 	logger.Info().Str("broadcaster", cmd.BroadcasterID).Msg("twitch client disconnected")
+}
+
+// HandleYouTubeConnect spawns a YouTube gRPC streamList client for the given
+// live chat ID. The client writes tagged JSON payloads to `out`, which the
+// writer goroutine drains into the ring buffer.
+func HandleYouTubeConnect(ctx context.Context, cmd control.Command, clients map[string]context.CancelFunc, out chan<- []byte, notify twitch.Notify, logger zerolog.Logger) {
+	chatID := cmd.LiveChatID
+	if chatID == "" {
+		logger.Warn().Msg("youtube_connect missing live_chat_id")
+		return
+	}
+
+	key := "yt:" + chatID
+	if _, exists := clients[key]; exists {
+		logger.Warn().Str("chat_id", chatID).Msg("already connected to youtube chat, ignoring")
+		return
+	}
+
+	clientCtx, clientCancel := context.WithCancel(ctx)
+
+	client := &youtube.Client{
+		LiveChatID:  chatID,
+		APIKey:      cmd.APIKey,
+		AccessToken: cmd.Token,
+		Out:         out,
+		Log:         logger.With().Str("youtube_chat", chatID).Logger(),
+		Notify:      notify,
+	}
+
+	clients[key] = clientCancel
+
+	go func() {
+		if err := client.Run(clientCtx); err != nil && !errors.Is(err, context.Canceled) {
+			logger.Error().Err(err).Str("chat_id", chatID).Msg("youtube client exited")
+		}
+	}()
+
+	logger.Info().Str("chat_id", chatID).Msg("youtube client started")
+}
+
+// HandleYouTubeDisconnect cancels and removes a previously-connected YouTube client.
+func HandleYouTubeDisconnect(cmd control.Command, clients map[string]context.CancelFunc, logger zerolog.Logger) {
+	chatID := cmd.LiveChatID
+	if chatID == "" {
+		logger.Warn().Msg("youtube_disconnect missing live_chat_id")
+		return
+	}
+	key := "yt:" + chatID
+	cancelFn, exists := clients[key]
+	if !exists {
+		logger.Warn().Str("chat_id", chatID).Msg("no active youtube connection to disconnect")
+		return
+	}
+	cancelFn()
+	delete(clients, key)
+	logger.Info().Str("chat_id", chatID).Msg("youtube client disconnected")
 }
 
 // readerScanner is a small helper used by tests; production code constructs
