@@ -12,6 +12,7 @@ import { measureNaturalWidth, prepareWithSegments } from "@chenglou/pretext";
 import type { ChatMessage } from "../stores/chatStore";
 import type { ResolvedBadge } from "../stores/badgeStore";
 import { splitMessage, type MessagePiece } from "./emoteSpans";
+import { formatTimestamp } from "./messageStyle";
 
 // Named families only. `system-ui` is unsafe for pretext accuracy on macOS.
 // Exported so `ChatFeed.tsx` applies the exact same stack that Pretext
@@ -23,6 +24,9 @@ export const MESSAGE_FONT_SIZE_PX = 13;
 const USERNAME_FONT = `700 ${MESSAGE_FONT_SIZE_PX}px ${MESSAGE_FONT_FAMILY}`;
 const SEPARATOR_FONT = `400 ${MESSAGE_FONT_SIZE_PX}px ${MESSAGE_FONT_FAMILY}`;
 const TEXT_FONT = `400 ${MESSAGE_FONT_SIZE_PX}px ${MESSAGE_FONT_FAMILY}`;
+// Timestamps render in the same family/size as body text but in the
+// dim-grey color the DOM applies; weight stays 400.
+const TIMESTAMP_FONT = TEXT_FONT;
 
 export const MESSAGE_LINE_HEIGHT = 20;
 export const MESSAGE_PADDING_Y = 4;
@@ -62,6 +66,7 @@ export interface PreparedMessage {
   prepared: PreparedRichInline;
   pieces: MessagePiece[];
   badges: BadgeRender[];
+  timestamp: string;
 }
 
 export function prepareMessage(
@@ -80,6 +85,20 @@ export function prepareMessage(
 
   const items: RichInlineItem[] = [];
   const placeholder = placeholderWidth(TEXT_FONT);
+
+  // Timestamp prefix: a single non-breaking text run so the username
+  // never wraps onto a line by itself when the timestamp pushes the
+  // first badge down. The trailing space keeps separation from badges
+  // without needing a separate item.
+  const timestamp = formatTimestamp(msg.timestamp);
+  if (timestamp) {
+    items.push({
+      text: `${timestamp} `,
+      font: TIMESTAMP_FONT,
+      break: "never",
+    });
+  }
+
   const badgeExtra = Math.max(0, BADGE_SIZE_PX + BADGE_GAP_PX - placeholder);
   for (let i = 0; i < badges.length; i++) {
     items.push({
@@ -107,7 +126,7 @@ export function prepareMessage(
     }
   }
 
-  return { prepared: prepareRichInline(items), pieces, badges };
+  return { prepared: prepareRichInline(items), pieces, badges, timestamp };
 }
 
 export function measureMessageHeight(

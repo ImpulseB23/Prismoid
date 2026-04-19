@@ -7,6 +7,7 @@
 import {
   Component,
   For,
+  Show,
   createEffect,
   createMemo,
   createSignal,
@@ -38,6 +39,7 @@ import {
   prepareMessage,
   type PreparedMessage,
 } from "../lib/messageLayout";
+import { normalizeUserColor } from "../lib/messageStyle";
 import type { MessagePiece } from "../lib/emoteSpans";
 
 const OVERSCAN = 6;
@@ -306,6 +308,17 @@ const ChatFeed: Component = () => {
                 "overflow-wrap": "break-word",
               }}
             >
+              <Show when={item.prepared.timestamp}>
+                <span
+                  style={{
+                    color: "#6e6e72",
+                    "margin-right": "4px",
+                    "white-space": "nowrap",
+                  }}
+                >
+                  {item.prepared.timestamp}
+                </span>
+              </Show>
               <For each={item.prepared.badges}>
                 {(b) => (
                   <img
@@ -332,7 +345,7 @@ const ChatFeed: Component = () => {
               </For>
               <span
                 style={{
-                  color: item.msg.color || "#9147ff",
+                  color: normalizeUserColor(item.msg.color),
                   "font-weight": 700,
                   // Keep DOM in lockstep with Pretext's `break: "never"`
                   // on the username segment so heights stay accurate even
