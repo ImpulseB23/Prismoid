@@ -33,8 +33,8 @@ type Client struct {
 	AccessToken string
 
 	Target string // override for testing; "" uses default
-	// DialOpts are appended to the default dial options. Tests inject
-	// grpc.WithTransportCredentials(insecure.NewCredentials()) here.
+	// DialOpts replaces the default dial options entirely when set. Tests
+	// inject grpc.WithTransportCredentials(insecure.NewCredentials()) here.
 	DialOpts []grpc.DialOption
 
 	Out    chan<- []byte
@@ -42,9 +42,19 @@ type Client struct {
 	Notify Notify
 }
 
+// ErrMissingCredentials is returned when neither APIKey nor AccessToken is set.
+var ErrMissingCredentials = errors.New("youtube: APIKey or AccessToken required")
+
 // Run connects to the YouTube gRPC streamList endpoint and reads messages
 // until ctx is cancelled. Reconnects automatically with exponential backoff.
 func (c *Client) Run(ctx context.Context) error {
+	if c.APIKey == "" && c.AccessToken == "" {
+		if c.Notify != nil {
+			c.Notify("auth_error", "youtube: missing api key or access token")
+		}
+		return ErrMissingCredentials
+	}
+
 	bo := backoff.New(1*time.Second, 30*time.Second)
 
 	var pageToken string
@@ -115,7 +125,7 @@ func (c *Client) connectAndStream(ctx context.Context, pageToken string) (string
 	if err != nil {
 		return pageToken, err
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 
 	stub := pb.NewV3DataLiveChatMessageServiceClient(conn)
 

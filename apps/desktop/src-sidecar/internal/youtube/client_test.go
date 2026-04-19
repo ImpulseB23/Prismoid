@@ -2,13 +2,17 @@ package youtube
 
 import (
 	"context"
+	"errors"
 	"net"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/rs/zerolog"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/proto"
 
 	"github.com/ImpulseB23/Prismoid/sidecar/internal/control"
@@ -18,6 +22,7 @@ import (
 type fakeStreamListServer struct {
 	pb.UnimplementedV3DataLiveChatMessageServiceServer
 	responses []*pb.LiveChatMessageListResponse
+	sendErr   error
 }
 
 func (f *fakeStreamListServer) StreamList(_ *pb.LiveChatMessageListRequest, stream pb.V3DataLiveChatMessageService_StreamListServer) error {
@@ -26,21 +31,37 @@ func (f *fakeStreamListServer) StreamList(_ *pb.LiveChatMessageListRequest, stre
 			return err
 		}
 	}
-	return nil
+	if f.sendErr != nil {
+		return f.sendErr
+	}
+	<-stream.Context().Done()
+	return stream.Context().Err()
 }
 
-func startFakeServer(t *testing.T, responses []*pb.LiveChatMessageListResponse) (string, func()) {
+func startFakeServer(t *testing.T, srvImpl pb.V3DataLiveChatMessageServiceServer) string {
 	t.Helper()
 	lis, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
 	}
 	srv := grpc.NewServer()
-	pb.RegisterV3DataLiveChatMessageServiceServer(srv, &fakeStreamListServer{responses: responses})
+	pb.RegisterV3DataLiveChatMessageServiceServer(srv, srvImpl)
 	go func() { _ = srv.Serve(lis) }()
-	return lis.Addr().String(), func() {
+	t.Cleanup(func() {
 		srv.Stop()
-		lis.Close()
+		_ = lis.Close()
+	})
+	return lis.Addr().String()
+}
+
+func newTestClient(addr string, out chan []byte) *Client {
+	return &Client{
+		LiveChatID: "chat-123",
+		APIKey:     "test-key",
+		Target:     "dns:///" + addr,
+		DialOpts:   []grpc.DialOption{grpc.WithTransportCredentials(insecure.NewCredentials())},
+		Out:        out,
+		Log:        zerolog.Nop(),
 	}
 }
 
@@ -72,83 +93,76 @@ func TestClientReceivesTextMessages(t *testing.T) {
 		},
 	}
 
-	addr, cleanup := startFakeServer(t, []*pb.LiveChatMessageListResponse{resp})
-	defer cleanup()
+	addr := startFakeServer(t, &fakeStreamListServer{responses: []*pb.LiveChatMessageListResponse{resp}})
 
 	out := make(chan []byte, 16)
-	client := &Client{
-		LiveChatID: "chat-123",
-		APIKey:     "test-key",
-		Target:     "dns:///" + addr,
-		DialOpts:   []grpc.DialOption{grpc.WithTransportCredentials(insecure.NewCredentials())},
-		Out:        out,
-		Log:        zerolog.Nop(),
-	}
+	client := newTestClient(addr, out)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	_ = client.Run(ctx)
+	done := make(chan error, 1)
+	go func() { done <- client.Run(ctx) }()
 
 	select {
 	case data := <-out:
+		cancel()
 		if len(data) < 2 {
 			t.Fatal("message too short")
 		}
 		if data[0] != control.TagYouTube {
 			t.Fatalf("expected tag 0x03, got 0x%02x", data[0])
 		}
-		json := string(data[1:])
-		if len(json) == 0 {
-			t.Fatal("empty json body")
+		body := string(data[1:])
+		if !strings.Contains(body, "msg-1") {
+			t.Errorf("expected message id msg-1 in json: %s", body)
 		}
-		// Verify the JSON contains expected fields
-		if !contains(json, "msg-1") {
-			t.Errorf("expected message id msg-1 in json: %s", json)
+		if !strings.Contains(body, "hello from test") {
+			t.Errorf("expected message text in json: %s", body)
 		}
-		if !contains(json, "hello from test") {
-			t.Errorf("expected message text in json: %s", json)
-		}
-	default:
-		t.Fatal("no message received on out channel")
+	case <-ctx.Done():
+		t.Fatal("timed out waiting for message")
+	}
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("client.Run did not exit after cancel")
 	}
 }
 
 func TestClientStopsOnNotFound(t *testing.T) {
-	// Empty server that returns no responses -> EOF -> client retries.
-	// For a permanent error test, we'd need to return a gRPC status.
-	// This test validates the client stops on context cancel.
-	addr, cleanup := startFakeServer(t, nil)
-	defer cleanup()
+	srv := &fakeStreamListServer{sendErr: status.Error(codes.NotFound, "chat not found")}
+	addr := startFakeServer(t, srv)
 
-	out := make(chan []byte, 16)
-	client := &Client{
-		LiveChatID: "bad-chat",
-		APIKey:     "test-key",
-		Target:     "dns:///" + addr,
-		DialOpts:   []grpc.DialOption{grpc.WithTransportCredentials(insecure.NewCredentials())},
-		Out:        out,
-		Log:        zerolog.Nop(),
-	}
+	out := make(chan []byte, 1)
+	client := newTestClient(addr, out)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
 	err := client.Run(ctx)
-	if err != nil && err != context.DeadlineExceeded {
-		// Expected: either context deadline or nil
+	if err == nil {
+		t.Fatal("expected NotFound error, got nil")
+	}
+	s, ok := status.FromError(err)
+	if !ok {
+		t.Fatalf("expected gRPC status error, got %T: %v", err, err)
+	}
+	if s.Code() != codes.NotFound {
+		t.Fatalf("expected NotFound, got %s", s.Code())
 	}
 }
 
-func contains(s, substr string) bool {
-	return len(s) >= len(substr) && searchStr(s, substr)
-}
-
-func searchStr(s, sub string) bool {
-	for i := 0; i <= len(s)-len(sub); i++ {
-		if s[i:i+len(sub)] == sub {
-			return true
-		}
+func TestClientRequiresCredentials(t *testing.T) {
+	out := make(chan []byte, 1)
+	client := &Client{
+		LiveChatID: "chat-123",
+		Out:        out,
+		Log:        zerolog.Nop(),
 	}
-	return false
+	err := client.Run(context.Background())
+	if !errors.Is(err, ErrMissingCredentials) {
+		t.Fatalf("expected ErrMissingCredentials, got %v", err)
+	}
 }

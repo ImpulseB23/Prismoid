@@ -265,36 +265,47 @@ pub fn parse_youtube_message(bytes: &[u8]) -> Result<Option<UnifiedMessage>, Par
         return Ok(None);
     }
 
-    let text = snippet
+    let text = match snippet
         .text_message_details
         .and_then(|d| d.message_text)
         .or(snippet.display_message)
-        .unwrap_or_default();
+        .filter(|s| !s.is_empty())
+    {
+        Some(t) => t,
+        None => return Ok(None),
+    };
 
-    let author = msg.author_details.unwrap_or(YouTubeAuthorDetails {
-        channel_id: None,
-        display_name: None,
-        is_chat_owner: None,
-        is_chat_moderator: None,
-        is_chat_sponsor: None,
-    });
+    let author = match msg.author_details {
+        Some(a) => a,
+        None => return Ok(None),
+    };
+
+    let channel_id = match author.channel_id.filter(|s| !s.is_empty()) {
+        Some(c) => c,
+        None => return Ok(None),
+    };
+    let display_name = match author.display_name.filter(|s| !s.is_empty()) {
+        Some(d) => d,
+        None => return Ok(None),
+    };
+    let id = match msg.id.filter(|s| !s.is_empty()) {
+        Some(i) => i,
+        None => return Ok(None),
+    };
 
     let is_broadcaster = author.is_chat_owner.unwrap_or(false);
     let is_mod = is_broadcaster || author.is_chat_moderator.unwrap_or(false);
     let is_subscriber = author.is_chat_sponsor.unwrap_or(false);
 
-    let timestamp = snippet
-        .published_at
-        .as_deref()
-        .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
-        .map(|dt| dt.timestamp_millis())
-        .unwrap_or_else(|| chrono::Utc::now().timestamp_millis());
-
-    let channel_id = author.channel_id.unwrap_or_default();
-    let display_name = author.display_name.unwrap_or_default();
+    let timestamp = match snippet.published_at.as_deref() {
+        Some(s) => chrono::DateTime::parse_from_rfc3339(s)
+            .map_err(ParseError::Timestamp)?
+            .timestamp_millis(),
+        None => chrono::Utc::now().timestamp_millis(),
+    };
 
     Ok(Some(UnifiedMessage {
-        id: msg.id.unwrap_or_default(),
+        id,
         platform: Platform::YouTube,
         timestamp,
         arrival_time: chrono::Utc::now().timestamp_millis(),
@@ -643,5 +654,87 @@ mod tests {
     fn youtube_missing_snippet_returns_none() {
         let msg = br#"{"id":"x","author_details":{"channel_id":"c","display_name":"d"}}"#;
         assert!(parse_youtube_message(msg).unwrap().is_none());
+    }
+
+    #[test]
+    fn youtube_missing_text_returns_none() {
+        let msg = br##"{
+            "id": "yt-empty",
+            "snippet": {
+                "type": "TEXT_MESSAGE_EVENT",
+                "published_at": "2024-06-15T12:30:00Z"
+            },
+            "author_details": { "channel_id": "c", "display_name": "d" }
+        }"##;
+        assert!(parse_youtube_message(msg).unwrap().is_none());
+    }
+
+    #[test]
+    fn youtube_empty_text_returns_none() {
+        let msg = br##"{
+            "id": "yt-empty",
+            "snippet": {
+                "type": "TEXT_MESSAGE_EVENT",
+                "published_at": "2024-06-15T12:30:00Z",
+                "text_message_details": { "message_text": "" }
+            },
+            "author_details": { "channel_id": "c", "display_name": "d" }
+        }"##;
+        assert!(parse_youtube_message(msg).unwrap().is_none());
+    }
+
+    #[test]
+    fn youtube_missing_author_returns_none() {
+        let msg = br##"{
+            "id": "yt-1",
+            "snippet": {
+                "type": "TEXT_MESSAGE_EVENT",
+                "published_at": "2024-06-15T12:30:00Z",
+                "text_message_details": { "message_text": "hi" }
+            }
+        }"##;
+        assert!(parse_youtube_message(msg).unwrap().is_none());
+    }
+
+    #[test]
+    fn youtube_missing_id_returns_none() {
+        let msg = br##"{
+            "snippet": {
+                "type": "TEXT_MESSAGE_EVENT",
+                "published_at": "2024-06-15T12:30:00Z",
+                "text_message_details": { "message_text": "hi" }
+            },
+            "author_details": { "channel_id": "c", "display_name": "d" }
+        }"##;
+        assert!(parse_youtube_message(msg).unwrap().is_none());
+    }
+
+    #[test]
+    fn youtube_bad_timestamp_returns_err() {
+        let msg = br##"{
+            "id": "yt-1",
+            "snippet": {
+                "type": "TEXT_MESSAGE_EVENT",
+                "published_at": "not a date",
+                "text_message_details": { "message_text": "hi" }
+            },
+            "author_details": { "channel_id": "c", "display_name": "d" }
+        }"##;
+        let err = parse_youtube_message(msg).unwrap_err();
+        assert!(matches!(err, ParseError::Timestamp(_)));
+    }
+
+    #[test]
+    fn youtube_missing_timestamp_uses_now() {
+        let msg = br##"{
+            "id": "yt-1",
+            "snippet": {
+                "type": "TEXT_MESSAGE_EVENT",
+                "text_message_details": { "message_text": "hi" }
+            },
+            "author_details": { "channel_id": "c", "display_name": "d" }
+        }"##;
+        let parsed = parse_youtube_message(msg).unwrap().unwrap();
+        assert!(parsed.timestamp > 0);
     }
 }
