@@ -6,10 +6,13 @@ import { open } from "@tauri-apps/plugin-shell";
 
 export type AuthStatusState = "logged_out" | "logged_in";
 
-export interface AuthStatus {
-  state: AuthStatusState;
-  login?: string;
-}
+// Discriminated union: when state is logged_in, login is guaranteed by
+// the backend (twitch_auth::commands::twitch_auth_status). Modeling it
+// this way prevents the UI from silently rendering an empty username if
+// a malformed payload ever slips through.
+export type AuthStatus =
+  | { state: "logged_out" }
+  | { state: "logged_in"; login: string };
 
 export interface DeviceCodeView {
   verification_uri: string;

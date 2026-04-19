@@ -1,22 +1,22 @@
 import { Component, Match, Switch, createSignal, onMount } from "solid-js";
 import ChatFeed from "./components/ChatFeed";
+import Header from "./components/Header";
 import SignIn from "./components/SignIn";
-import { getAuthStatus, type AuthStatusState } from "./lib/twitchAuth";
+import { getAuthStatus, type AuthStatus } from "./lib/twitchAuth";
 
 const App: Component = () => {
   // `null` = still loading initial status; the splash avoids a flash of
   // the SignIn overlay before the keychain check returns.
-  const [authState, setAuthState] = createSignal<AuthStatusState | null>(null);
+  const [auth, setAuth] = createSignal<AuthStatus | null>(null);
 
   onMount(async () => {
     try {
-      const status = await getAuthStatus();
-      setAuthState(status.state);
+      setAuth(await getAuthStatus());
     } catch {
       // Treat any error from the status command as logged-out — the
       // SignIn flow surfaces a real error message if the underlying
       // keychain is broken.
-      setAuthState("logged_out");
+      setAuth({ state: "logged_out" });
     }
   });
 
@@ -25,7 +25,7 @@ const App: Component = () => {
       style={{ display: "flex", "flex-direction": "column", height: "100%" }}
     >
       <Switch>
-        <Match when={authState() === null}>
+        <Match when={auth() === null}>
           <div
             style={{
               display: "flex",
@@ -39,11 +39,23 @@ const App: Component = () => {
             Loading...
           </div>
         </Match>
-        <Match when={authState() === "logged_out"}>
-          <SignIn onAuthenticated={() => setAuthState("logged_in")} />
+        <Match when={auth()?.state === "logged_out"}>
+          <SignIn
+            onAuthenticated={(login) => setAuth({ state: "logged_in", login })}
+          />
         </Match>
-        <Match when={authState() === "logged_in"}>
-          <ChatFeed />
+        <Match
+          when={(() => {
+            const a = auth();
+            return a?.state === "logged_in" ? a : null;
+          })()}
+        >
+          {(loggedIn) => (
+            <>
+              <Header login={loggedIn().login} />
+              <ChatFeed />
+            </>
+          )}
         </Match>
       </Switch>
     </div>
