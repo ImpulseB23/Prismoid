@@ -21,9 +21,7 @@ export function fitsLimit(text: string): boolean {
 }
 
 // Maps a structured Tauri command error into a short human message
-// suitable for an inline status line under the input. Falls back to
-// the raw `message` field for anything we don't have a tailored copy
-// for, since the backend already includes a useful diagnostic.
+// suitable for an inline status line under the input.
 export function formatSendError(err: SendMessageError): string {
   switch (err.kind) {
     case "not_logged_in":
@@ -40,21 +38,43 @@ export function formatSendError(err: SendMessageError): string {
       return `Connection error: ${err.message}`;
     case "json":
       return `Encoding error: ${err.message}`;
+    case "helix":
+      return err.code
+        ? `Twitch rejected message (${err.code}): ${err.message}`
+        : `Twitch rejected message: ${err.message}`;
   }
 }
 
-// Best-effort guard for objects coming back from Tauri's invoke reject
-// path. The Rust side serializes the discriminated union with a `kind`
-// tag, so anything carrying a string `kind` we treat as the structured
-// shape; everything else gets stringified.
+// Per-variant required-field validators. Used by toSendError to make
+// sure formatSendError never reads a field that doesn't exist on a
+// look-alike object the backend didn't actually send.
+const VARIANT_GUARDS: Record<
+  SendMessageError["kind"],
+  (v: Record<string, unknown>) => boolean
+> = {
+  empty_message: () => true,
+  sidecar_not_running: () => true,
+  not_logged_in: (v) => typeof v.message === "string",
+  io: (v) => typeof v.message === "string",
+  auth: (v) => typeof v.message === "string",
+  json: (v) => typeof v.message === "string",
+  message_too_long: (v) => typeof v.max_bytes === "number",
+  helix: (v) => typeof v.code === "string" && typeof v.message === "string",
+};
+
+// Strict guard for objects coming back from Tauri's invoke reject path.
+// Only objects matching a known SendMessageError variant (correct
+// `kind` and required field types) pass through as the structured
+// shape; anything else is stringified so formatSendError is never
+// handed a value missing the fields it expects.
 export function toSendError(value: unknown): SendMessageError | string {
-  if (
-    value &&
-    typeof value === "object" &&
-    "kind" in value &&
-    typeof (value as { kind: unknown }).kind === "string"
-  ) {
-    return value as SendMessageError;
+  if (value && typeof value === "object" && !Array.isArray(value)) {
+    const obj = value as Record<string, unknown>;
+    const kind = obj.kind;
+    if (typeof kind === "string" && kind in VARIANT_GUARDS) {
+      const guard = VARIANT_GUARDS[kind as SendMessageError["kind"]];
+      if (guard(obj)) return obj as SendMessageError;
+    }
   }
   return String(value);
 }

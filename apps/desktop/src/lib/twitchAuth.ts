@@ -68,7 +68,8 @@ export type SendMessageError =
   | { kind: "sidecar_not_running" }
   | { kind: "io"; message: string }
   | { kind: "auth"; message: string }
-  | { kind: "json"; message: string };
+  | { kind: "json"; message: string }
+  | { kind: "helix"; code: string; message: string };
 
 export const MAX_CHAT_MESSAGE_BYTES = 500;
 

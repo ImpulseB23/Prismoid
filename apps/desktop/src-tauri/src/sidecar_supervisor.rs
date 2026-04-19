@@ -346,7 +346,7 @@ async fn run_once<R: Runtime>(
         &mut rx,
         cfg.heartbeat_timeout,
         attempt,
-        |bytes| handle_sidecar_stdout(bytes, app, &emote_index),
+        |bytes| handle_sidecar_stdout(bytes, app, &emote_index, sender),
         || {
             if let Some(c) = sender.clear() {
                 if let Err(e) = c.kill() {
@@ -516,19 +516,25 @@ fn handle_sidecar_stdout<R: Runtime>(
     bytes: &[u8],
     app: &AppHandle<R>,
     emote_index: &Arc<EmoteIndex>,
+    sender: &SidecarCommandSender,
 ) -> bool {
-    scan_sidecar_stdout(bytes, |bundle| apply_emote_bundle(bundle, app, emote_index))
+    scan_sidecar_stdout(
+        bytes,
+        |bundle| apply_emote_bundle(bundle, app, emote_index),
+        |result| sender.complete_send_chat(result),
+    )
 }
 
 /// Pure scan-and-dispatch core of [`handle_sidecar_stdout`]. Splits the
 /// batch on newlines, parses each non-empty piece via
 /// [`parse_sidecar_event`], returns `true` if any line was a heartbeat,
-/// and invokes `on_bundle` for each parsed [`EmoteBundle`]. Factored out
-/// from `handle_sidecar_stdout` so it can be unit-tested without a Tauri
-/// runtime (the AppHandle-dependent work happens inside the closure).
-fn scan_sidecar_stdout<F>(bytes: &[u8], mut on_bundle: F) -> bool
+/// and invokes `on_bundle`/`on_send_result` for the corresponding
+/// variants. Factored out so it can be unit-tested without a Tauri
+/// runtime (the AppHandle-dependent work happens inside the closures).
+fn scan_sidecar_stdout<F, G>(bytes: &[u8], mut on_bundle: F, mut on_send_result: G) -> bool
 where
     F: FnMut(Box<crate::emote_index::EmoteBundle>),
+    G: FnMut(crate::host::SendChatResult),
 {
     let mut saw_heartbeat = false;
     for line in bytes.split(|b| *b == b'\n') {
@@ -538,6 +544,7 @@ where
         match parse_sidecar_event(line) {
             SidecarEvent::Heartbeat => saw_heartbeat = true,
             SidecarEvent::EmoteBundle(bundle) => on_bundle(bundle),
+            SidecarEvent::SendChatResult(r) => on_send_result(r),
             SidecarEvent::Other(t) => {
                 tracing::debug!(msg_type = %t, "unhandled sidecar control message");
             }
@@ -657,14 +664,26 @@ mod tests {
 
     #[test]
     fn scan_sidecar_stdout_returns_false_on_empty_input() {
-        assert!(!scan_sidecar_stdout(b"", |_| panic!("no bundle")));
-        assert!(!scan_sidecar_stdout(b"\n\n\n", |_| panic!("no bundle")));
+        assert!(!scan_sidecar_stdout(
+            b"",
+            |_| panic!("no bundle"),
+            |_| panic!("no result")
+        ));
+        assert!(!scan_sidecar_stdout(
+            b"\n\n\n",
+            |_| panic!("no bundle"),
+            |_| panic!("no result")
+        ));
     }
 
     #[test]
     fn scan_sidecar_stdout_detects_single_heartbeat() {
         let line = br#"{"type":"heartbeat","payload":{"ts_ms":1,"counter":1}}"#;
-        assert!(scan_sidecar_stdout(line, |_| panic!("no bundle")));
+        assert!(scan_sidecar_stdout(
+            line,
+            |_| panic!("no bundle"),
+            |_| panic!("no result")
+        ));
     }
 
     #[test]
@@ -675,7 +694,11 @@ mod tests {
         batch.push(b'\n');
         batch.extend_from_slice(br#"{"type":"heartbeat","payload":{"ts_ms":1,"counter":1}}"#);
         batch.push(b'\n');
-        assert!(scan_sidecar_stdout(&batch, |_| panic!("no bundle")));
+        assert!(scan_sidecar_stdout(
+            &batch,
+            |_| panic!("no bundle"),
+            |_| panic!("no result")
+        ));
     }
 
     #[test]
@@ -683,7 +706,11 @@ mod tests {
         let mut batch = Vec::new();
         batch.extend_from_slice(b"not json\n");
         batch.extend_from_slice(br#"{"type":"future_thing","payload":{}}"#);
-        assert!(!scan_sidecar_stdout(&batch, |_| panic!("no bundle")));
+        assert!(!scan_sidecar_stdout(
+            &batch,
+            |_| panic!("no bundle"),
+            |_| panic!("no result")
+        ));
     }
 
     #[test]
@@ -694,10 +721,14 @@ mod tests {
         batch.extend_from_slice(br#"{"type":"heartbeat","payload":{"ts_ms":2,"counter":2}}"#);
 
         let mut bundles = 0_usize;
-        let saw_heartbeat = scan_sidecar_stdout(&batch, |bundle| {
-            assert_eq!(bundle.total_emotes(), 1);
-            bundles += 1;
-        });
+        let saw_heartbeat = scan_sidecar_stdout(
+            &batch,
+            |bundle| {
+                assert_eq!(bundle.total_emotes(), 1);
+                bundles += 1;
+            },
+            |_| panic!("no result"),
+        );
 
         assert!(saw_heartbeat);
         assert_eq!(bundles, 1);
@@ -709,7 +740,23 @@ mod tests {
         batch.extend_from_slice(b"\n\n");
         batch.extend_from_slice(br#"{"type":"heartbeat","payload":{"ts_ms":3,"counter":3}}"#);
         batch.extend_from_slice(b"\n\n");
-        assert!(scan_sidecar_stdout(&batch, |_| panic!("no bundle")));
+        assert!(scan_sidecar_stdout(
+            &batch,
+            |_| panic!("no bundle"),
+            |_| panic!("no result")
+        ));
+    }
+
+    #[test]
+    fn scan_sidecar_stdout_dispatches_send_chat_result() {
+        let line = br#"{"type":"send_chat_result","payload":{"request_id":7,"ok":true,"message_id":"m1"}}"#;
+        let mut got = None;
+        let saw_heartbeat = scan_sidecar_stdout(line, |_| panic!("no bundle"), |r| got = Some(r));
+        assert!(!saw_heartbeat);
+        let r = got.expect("result dispatched");
+        assert_eq!(r.request_id, 7);
+        assert!(r.ok);
+        assert_eq!(r.message_id, "m1");
     }
 
     // -- run_event_loop tests --------------------------------------------
@@ -870,7 +917,7 @@ mod tests {
             |bytes| {
                 stdout_calls.set(stdout_calls.get() + 1);
                 // Forward to the pure scanner so heartbeat detection is real.
-                scan_sidecar_stdout(bytes, |_| {})
+                scan_sidecar_stdout(bytes, |_| {}, |_| {})
             },
             || kill_calls.set(kill_calls.get() + 1),
             || {},

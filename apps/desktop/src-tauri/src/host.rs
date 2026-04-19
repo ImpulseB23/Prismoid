@@ -193,6 +193,10 @@ pub struct SendChatMessageArgs<'a> {
     pub broadcaster_id: &'a str,
     pub user_id: &'a str,
     pub message: &'a str,
+    /// Opaque correlation id echoed back in the sidecar's
+    /// `send_chat_result` notification so the host can match the result
+    /// to the awaiting Tauri invocation.
+    pub request_id: u64,
 }
 
 /// Serializes a `send_chat_message` control command line for the sidecar.
@@ -207,6 +211,7 @@ pub fn build_send_chat_message_line(args: SendChatMessageArgs<'_>) -> serde_json
         broadcaster_id: &'a str,
         user_id: &'a str,
         message: &'a str,
+        request_id: u64,
     }
     let cmd = SendCmd {
         cmd: "send_chat_message",
@@ -215,6 +220,7 @@ pub fn build_send_chat_message_line(args: SendChatMessageArgs<'_>) -> serde_json
         broadcaster_id: args.broadcaster_id,
         user_id: args.user_id,
         message: args.message,
+        request_id: args.request_id,
     };
     let mut bytes = serde_json::to_vec(&cmd)?;
     bytes.push(b'\n');
@@ -279,11 +285,39 @@ pub enum SidecarEvent {
     /// consumed by the host to rebuild its emote index. Boxed because the
     /// bundle is much larger than the other variants.
     EmoteBundle(Box<EmoteBundle>),
+    /// `{"type":"send_chat_result","payload":SendChatResult}`. Routed
+    /// back to the awaiting `twitch_send_message` invocation via its
+    /// `request_id` correlation field.
+    SendChatResult(SendChatResult),
     /// A well-formed `{type, payload}` message the host does not yet
     /// recognize. The inner string is the type tag.
     Other(String),
     /// Line was not valid JSON or lacked the `{type, payload}` shape.
     Invalid,
+}
+
+/// Parsed payload of a `send_chat_result` notification. Mirrors the
+/// Go-side `sidecar.SendChatResultPayload` shape.
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct SendChatResult {
+    /// Echoed-back correlation id from the originating `send_chat_message`
+    /// command. The host uses this to find the awaiting completer.
+    #[serde(default)]
+    pub request_id: u64,
+    pub ok: bool,
+    /// Helix-assigned id for a successfully accepted message. Currently
+    /// surfaced into `send_chat_result` for future echo-suppression /
+    /// optimistic-render confirmation; not consumed by the dispatcher
+    /// itself.
+    #[allow(dead_code)]
+    #[serde(default)]
+    pub message_id: String,
+    #[serde(default)]
+    pub drop_code: String,
+    #[serde(default)]
+    pub drop_message: String,
+    #[serde(default)]
+    pub error_message: String,
 }
 
 /// Parses one line of sidecar stdout into a [`SidecarEvent`]. The sidecar
@@ -318,6 +352,16 @@ pub fn parse_sidecar_event(bytes: &[u8]) -> SidecarEvent {
                 Ok(b) => SidecarEvent::EmoteBundle(Box::new(b)),
                 Err(e) => {
                     tracing::warn!(error = %e, "emote_bundle payload decode failed");
+                    SidecarEvent::Invalid
+                }
+            }
+        }
+        "send_chat_result" => {
+            let payload = env.payload.unwrap_or(serde_json::Value::Null);
+            match serde_json::from_value::<SendChatResult>(payload) {
+                Ok(r) => SidecarEvent::SendChatResult(r),
+                Err(e) => {
+                    tracing::warn!(error = %e, "send_chat_result payload decode failed");
                     SidecarEvent::Invalid
                 }
             }
@@ -607,5 +651,52 @@ mod tests {
         // caller logs it, rather than silently dropping it as Other.
         let line = br#"{"type":"emote_bundle","payload":{"twitch_global_emotes":"oops"}}"#;
         assert!(matches!(parse_sidecar_event(line), SidecarEvent::Invalid));
+    }
+
+    #[test]
+    fn parse_sidecar_event_decodes_send_chat_result_success() {
+        let line = br#"{"type":"send_chat_result","payload":{"request_id":42,"ok":true,"message_id":"abc"}}"#;
+        match parse_sidecar_event(line) {
+            SidecarEvent::SendChatResult(r) => {
+                assert_eq!(r.request_id, 42);
+                assert!(r.ok);
+                assert_eq!(r.message_id, "abc");
+            }
+            _ => panic!("expected SendChatResult"),
+        }
+    }
+
+    #[test]
+    fn parse_sidecar_event_decodes_send_chat_result_drop() {
+        let line = br#"{"type":"send_chat_result","payload":{"request_id":7,"ok":false,"drop_code":"msg_duplicate","drop_message":"dup"}}"#;
+        match parse_sidecar_event(line) {
+            SidecarEvent::SendChatResult(r) => {
+                assert_eq!(r.request_id, 7);
+                assert!(!r.ok);
+                assert_eq!(r.drop_code, "msg_duplicate");
+            }
+            _ => panic!("expected SendChatResult"),
+        }
+    }
+
+    #[test]
+    fn build_send_chat_message_line_includes_request_id() {
+        let line = build_send_chat_message_line(SendChatMessageArgs {
+            client_id: "cid",
+            access_token: "tok",
+            broadcaster_id: "b",
+            user_id: "u",
+            message: "hi",
+            request_id: 99,
+        })
+        .unwrap();
+        assert_eq!(line.last(), Some(&b'\n'));
+        let body = &line[..line.len() - 1];
+        let parsed: serde_json::Value = serde_json::from_slice(body).unwrap();
+        assert_eq!(parsed["cmd"], "send_chat_message");
+        assert_eq!(parsed["request_id"], 99);
+        assert_eq!(parsed["broadcaster_id"], "b");
+        assert_eq!(parsed["message"], "hi");
+        assert_eq!(parsed["token"], "tok");
     }
 }

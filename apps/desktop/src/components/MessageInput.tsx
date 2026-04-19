@@ -1,7 +1,6 @@
-// Chat send input. Single-line textarea-like input pinned below the
-// message feed. Enter sends, Shift+Enter inserts a newline (Helix
-// permits multi-line bodies), and the inline status row surfaces drop
-// reasons or transport errors from the Tauri command.
+// Chat send input pinned below the message feed. Single-line: Enter
+// sends, and the inline status row surfaces drop reasons or transport
+// errors from the Tauri command.
 
 import { Component, Show, createSignal } from "solid-js";
 import {
@@ -52,7 +51,7 @@ const MessageInput: Component = () => {
   };
 
   const onKeyDown = (e: KeyboardEvent) => {
-    if (e.key === "Enter" && !e.shiftKey) {
+    if (e.key === "Enter") {
       e.preventDefault();
       void submit();
     }
@@ -78,6 +77,7 @@ const MessageInput: Component = () => {
         <input
           ref={(el) => (inputEl = el)}
           type="text"
+          aria-label="Send a chat message"
           value={text()}
           placeholder="Send a message"
           disabled={pending()}

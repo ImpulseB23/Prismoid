@@ -49,13 +49,38 @@ describe("formatSendError", () => {
     );
     expect(formatSendError({ kind: "io", message: "pipe" })).toContain("pipe");
     expect(formatSendError({ kind: "json", message: "bad" })).toContain("bad");
+    expect(
+      formatSendError({
+        kind: "helix",
+        code: "msg_duplicate",
+        message: "duplicate message",
+      }),
+    ).toContain("msg_duplicate");
+    expect(
+      formatSendError({ kind: "helix", code: "", message: "blocked" }),
+    ).toContain("blocked");
   });
 });
 
 describe("toSendError", () => {
-  it("passes through structured errors", () => {
+  it("passes through valid structured errors", () => {
     const err = { kind: "empty_message" };
     expect(toSendError(err)).toBe(err);
+    const helix = { kind: "helix", code: "x", message: "y" };
+    expect(toSendError(helix)).toBe(helix);
+  });
+
+  it("rejects look-alike objects with the wrong shape", () => {
+    // missing required `max_bytes`
+    expect(toSendError({ kind: "message_too_long" })).toBe("[object Object]");
+    // wrong type for required field
+    expect(toSendError({ kind: "io", message: 5 })).toBe("[object Object]");
+    // unknown variant
+    expect(toSendError({ kind: "made_up_kind" })).toBe("[object Object]");
+    // arrays should not be accepted
+    expect(toSendError([{ kind: "empty_message" }])).not.toMatchObject({
+      kind: "empty_message",
+    });
   });
 
   it("stringifies unknown shapes", () => {
