@@ -12,8 +12,12 @@ use std::time::Duration;
 use serde::Serialize;
 
 use crate::emote_index::{EmoteBundle, EmoteIndex};
-use crate::message::{parse_twitch_envelope, UnifiedMessage};
+use crate::message::{parse_kick_event, parse_twitch_envelope, UnifiedMessage};
 use crate::ringbuf::RawHandle;
+
+/// Platform tag bytes prepended by the Go sidecar. Must match control.go.
+const TAG_TWITCH: u8 = 0x01;
+const TAG_KICK: u8 = 0x02;
 
 /// Timeout for [`ringbuf::RingBufReader::wait_for_signal`] in the host drain
 /// loop. In the happy path the sidecar signals the auto-reset event after
@@ -54,8 +58,19 @@ pub struct TwitchCreds {
 /// cannot kill the drain loop (`docs/stability.md` §Rust Panic Handling).
 pub fn parse_batch(raw: &[Vec<u8>], batch: &mut Vec<UnifiedMessage>, emote_index: &EmoteIndex) {
     for payload in raw {
-        let slice = payload.as_slice();
-        let outcome = std::panic::catch_unwind(|| parse_twitch_envelope(slice));
+        if payload.is_empty() {
+            continue;
+        }
+        let tag = payload[0];
+        let data = &payload[1..];
+        let outcome = std::panic::catch_unwind(|| match tag {
+            TAG_TWITCH => parse_twitch_envelope(data),
+            TAG_KICK => parse_kick_event(data),
+            _ => {
+                tracing::warn!(tag, "unknown platform tag, dropping message");
+                Ok(None)
+            }
+        });
         match outcome {
             Ok(Ok(Some(mut msg))) => {
                 emote_index.scan_into(&msg.message_text, &mut msg.emote_spans);
@@ -112,6 +127,23 @@ pub fn build_twitch_connect_line(creds: &TwitchCreds) -> serde_json::Result<Vec<
         token: &creds.access_token,
         broadcaster_id: &creds.broadcaster_id,
         user_id: &creds.user_id,
+    };
+    let mut bytes = serde_json::to_vec(&cmd)?;
+    bytes.push(b'\n');
+    Ok(bytes)
+}
+
+/// Serializes a `kick_connect` control command line for the sidecar.
+#[allow(dead_code)]
+pub fn build_kick_connect_line(chatroom_id: i64) -> serde_json::Result<Vec<u8>> {
+    #[derive(Serialize)]
+    struct ConnectCmd {
+        cmd: &'static str,
+        chatroom_id: i64,
+    }
+    let cmd = ConnectCmd {
+        cmd: "kick_connect",
+        chatroom_id,
     };
     let mut bytes = serde_json::to_vec(&cmd)?;
     bytes.push(b'\n');
@@ -260,7 +292,8 @@ mod tests {
 
     #[test]
     fn parse_batch_filters_non_chat_and_parse_errors() {
-        let viewer = br##"{
+        let viewer = {
+            let json = br##"{
             "metadata": {"message_id":"m","message_type":"notification","message_timestamp":"2023-11-06T18:11:47.492Z"},
             "payload": {
                 "subscription": {"type":"channel.chat.message"},
@@ -269,9 +302,22 @@ mod tests {
                     "message_id":"mid","message":{"text":"hi"}
                 }
             }
-        }"##.to_vec();
-        let keepalive = br##"{"metadata":{"message_id":"ka","message_type":"session_keepalive","message_timestamp":"2023-11-06T18:11:49.000Z"},"payload":{}}"##.to_vec();
-        let junk = b"not json".to_vec();
+        }"##;
+            let mut tagged = vec![TAG_TWITCH];
+            tagged.extend_from_slice(json);
+            tagged
+        };
+        let keepalive = {
+            let json = br##"{"metadata":{"message_id":"ka","message_type":"session_keepalive","message_timestamp":"2023-11-06T18:11:49.000Z"},"payload":{}}"##;
+            let mut tagged = vec![TAG_TWITCH];
+            tagged.extend_from_slice(json);
+            tagged
+        };
+        let junk = {
+            let mut tagged = vec![TAG_TWITCH];
+            tagged.extend_from_slice(b"not json");
+            tagged
+        };
 
         let raw = vec![viewer, keepalive, junk];
         let mut batch = Vec::new();
@@ -295,7 +341,8 @@ mod tests {
         // Verifies that parse_batch appends rather than clearing. The drain
         // loop owns clearing between ticks; this lets the loop avoid any
         // allocation churn on the hot path.
-        let viewer = br##"{
+        let viewer = {
+            let json = br##"{
             "metadata": {"message_id":"m","message_type":"notification","message_timestamp":"2023-11-06T18:11:47.492Z"},
             "payload": {
                 "subscription": {"type":"channel.chat.message"},
@@ -304,11 +351,14 @@ mod tests {
                     "message_id":"mid","message":{"text":"second"}
                 }
             }
-        }"##.to_vec();
+        }"##;
+            let mut tagged = vec![TAG_TWITCH];
+            tagged.extend_from_slice(json);
+            tagged
+        };
 
         let mut batch = Vec::new();
         let idx = EmoteIndex::new();
-        // Pretend a previous tick left one item in the scratch.
         parse_batch(std::slice::from_ref(&viewer), &mut batch, &idx);
         assert_eq!(batch.len(), 1);
         assert_eq!(batch[0].message_text, "second");
@@ -323,7 +373,8 @@ mod tests {
     fn parse_batch_attaches_emote_spans_from_index() {
         use crate::emote_index::{EmoteMeta, Provider};
 
-        let viewer = br##"{
+        let viewer = {
+            let json = br##"{
             "metadata": {"message_id":"m","message_type":"notification","message_timestamp":"2023-11-06T18:11:47.492Z"},
             "payload": {
                 "subscription": {"type":"channel.chat.message"},
@@ -332,7 +383,11 @@ mod tests {
                     "message_id":"mid","message":{"text":"hello Kappa world"}
                 }
             }
-        }"##.to_vec();
+        }"##;
+            let mut tagged = vec![TAG_TWITCH];
+            tagged.extend_from_slice(json);
+            tagged
+        };
 
         let idx = EmoteIndex::new();
         idx.load([EmoteMeta {
@@ -356,6 +411,34 @@ mod tests {
         assert_eq!(span.start, 6);
         assert_eq!(span.end, 11);
         assert_eq!(span.emote.code.as_ref(), "Kappa");
+    }
+
+    #[test]
+    fn parse_batch_handles_kick_messages() {
+        let kick_msg = {
+            let json = br##"{"event":"App\\Events\\ChatMessageEvent","data":"{\"id\":\"k1\",\"chatroom_id\":100,\"content\":\"hello from kick\",\"type\":\"message\",\"created_at\":\"2025-06-01T12:00:00Z\",\"sender\":{\"id\":42,\"username\":\"kuser\",\"slug\":\"kuser\",\"identity\":{\"color\":\"#00FF00\",\"badges\":[]}}}","channel":"chatrooms.100.v2"}"##;
+            let mut tagged = vec![TAG_KICK];
+            tagged.extend_from_slice(json);
+            tagged
+        };
+
+        let mut batch = Vec::new();
+        let idx = EmoteIndex::new();
+        parse_batch(std::slice::from_ref(&kick_msg), &mut batch, &idx);
+        assert_eq!(batch.len(), 1);
+        assert_eq!(batch[0].message_text, "hello from kick");
+        assert!(matches!(batch[0].platform, crate::message::Platform::Kick));
+    }
+
+    #[test]
+    fn parse_batch_skips_empty_and_unknown_tags() {
+        let empty: Vec<u8> = vec![];
+        let unknown = vec![0xFF, b'{', b'}'];
+        let raw = vec![empty, unknown];
+        let mut batch = Vec::new();
+        let idx = EmoteIndex::new();
+        parse_batch(&raw, &mut batch, &idx);
+        assert!(batch.is_empty());
     }
 
     #[cfg(windows)]

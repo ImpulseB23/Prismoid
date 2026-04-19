@@ -80,11 +80,52 @@ YouTube Data API v3 has a daily quota (default 10,000 units). gRPC streaming kee
 
 ---
 
-## Kick (Phase 5)
+## Kick
 
-Reverse-engineered Pusher WebSocket. No official API.
+### Authentication
 
-Connection is fragile and must be fully isolated. Kick connection failures must never affect Twitch or YouTube connections. Separate goroutine, separate error handling, separate reconnection logic.
+OAuth 2.1 Authorization Code + PKCE via `id.kick.com`. Kick launched an official public API at `docs.kick.com` in 2025.
+
+Required scopes:
+
+- `chat:write` - send chat messages and allow bots to post
+- `events:subscribe` - subscribe to channel events (chat, follows, subs)
+- `moderation:ban` - ban/timeout/unban users
+- `moderation:chat_message:manage` - delete chat messages
+- `channel:read` - read channel information
+- `user:read` - read user information
+
+Token storage: OS keychain, same as Twitch (one JSON blob per account).
+Token refresh: proactive, 5 minutes before expiry. Token endpoint: `POST https://id.kick.com/oauth/token` with `grant_type=refresh_token`.
+
+### Chat (read)
+
+Pusher WebSocket, not the official webhook API. The official API delivers chat events via webhooks (`POST` to a public URL), which a desktop app cannot receive without a tunnel. Pusher is what Kick's own web client uses and is the standard approach for all third-party Kick clients.
+
+Connect to `wss://ws-us2.pusher.com/app/32cbd69e4b950bf97679?protocol=7&client=js&version=8.4.0-rc2&flash=false`. Subscribe to `chatroom.{chatroom_id}` channel. Messages arrive as Pusher `ChatMessageEvent` events containing sender identity (username, color, badges), message content, emote positions, and reply context.
+
+Chatroom ID is looked up from the channel slug via `GET https://api.kick.com/public/v1/channels?slug={slug}`.
+
+Kick connection failures must never affect Twitch or YouTube connections. Separate goroutine, separate error handling, separate reconnection logic.
+
+### Chat (write)
+
+Official API `POST https://api.kick.com/public/v1/chat` with `broadcaster_user_id`, `content`, and `type` (`"user"` or `"bot"`). Requires `chat:write` scope.
+
+### Moderation
+
+| Action          | Endpoint                                                    |
+| --------------- | ----------------------------------------------------------- |
+| Delete message  | `DELETE /public/v1/chat/{message_id}`                       |
+| Timeout         | `POST /public/v1/moderation/bans` with `duration` (minutes) |
+| Ban (permanent) | `POST /public/v1/moderation/bans` without `duration`        |
+| Unban           | `DELETE /public/v1/moderation/bans`                         |
+
+Duration range for timeouts: 1 to 10,080 minutes (7 days).
+
+### Rate Limits
+
+Official API rate limits TBD (not yet documented). Token bucket rate limiter in Go, same pattern as Twitch.
 
 ---
 

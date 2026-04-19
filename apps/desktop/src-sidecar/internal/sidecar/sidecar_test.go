@@ -171,19 +171,18 @@ func TestRunWriter_SkipsSignalOnRejectedPayload(t *testing.T) {
 	in := make(chan []byte, 2)
 	in <- make([]byte, 32)
 	in <- make([]byte, 8)
+	close(in)
 
 	var signalCount atomic.Int32
 	signal := func() { signalCount.Add(1) }
 
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx := context.Background()
 	done := make(chan struct{})
 	go func() {
 		RunWriter(ctx, in, writer, signal)
 		close(done)
 	}()
 
-	time.Sleep(50 * time.Millisecond)
-	cancel()
 	<-done
 
 	// Only the second (valid) write should have signaled.
@@ -932,5 +931,114 @@ func TestProviderError_JSONIncludesErrorString(t *testing.T) {
 		!strings.Contains(got, `"scope":"global"`) ||
 		!strings.Contains(got, `"error":"network down"`) {
 		t.Errorf("unexpected JSON: %s", got)
+	}
+}
+
+func TestHandleKickConnect_AddsClient(t *testing.T) {
+	clients := make(map[string]context.CancelFunc)
+	out := make(chan []byte, 1)
+	cmd := control.Command{
+		Cmd:        "kick_connect",
+		ChatroomID: 12345,
+	}
+
+	HandleKickConnect(context.Background(), cmd, clients, out, zerolog.Nop())
+
+	if _, ok := clients["kick:12345"]; !ok {
+		t.Fatal("expected kick client to be registered")
+	}
+	clients["kick:12345"]()
+}
+
+func TestHandleKickConnect_RejectsDuplicate(t *testing.T) {
+	clients := make(map[string]context.CancelFunc)
+	out := make(chan []byte, 1)
+
+	var cancelled atomic.Bool
+	clients["kick:12345"] = func() { cancelled.Store(true) }
+
+	cmd := control.Command{Cmd: "kick_connect", ChatroomID: 12345}
+	HandleKickConnect(context.Background(), cmd, clients, out, zerolog.Nop())
+
+	if cancelled.Load() {
+		t.Fatal("existing kick client cancel was overwritten")
+	}
+	if len(clients) != 1 {
+		t.Fatalf("expected 1 client, got %d", len(clients))
+	}
+}
+
+func TestHandleKickConnect_RejectsZeroChatroomID(t *testing.T) {
+	clients := make(map[string]context.CancelFunc)
+	out := make(chan []byte, 1)
+	cmd := control.Command{Cmd: "kick_connect", ChatroomID: 0}
+
+	HandleKickConnect(context.Background(), cmd, clients, out, zerolog.Nop())
+
+	if len(clients) != 0 {
+		t.Fatalf("expected no clients for zero chatroom ID, got %d", len(clients))
+	}
+}
+
+func TestHandleKickConnect_RejectsNegativeChatroomID(t *testing.T) {
+	clients := make(map[string]context.CancelFunc)
+	out := make(chan []byte, 1)
+	cmd := control.Command{Cmd: "kick_connect", ChatroomID: -1}
+
+	HandleKickConnect(context.Background(), cmd, clients, out, zerolog.Nop())
+
+	if len(clients) != 0 {
+		t.Fatalf("expected no clients for negative chatroom ID, got %d", len(clients))
+	}
+}
+
+func TestHandleKickDisconnect_CancelsAndRemoves(t *testing.T) {
+	clients := make(map[string]context.CancelFunc)
+	var cancelled atomic.Bool
+	clients["kick:12345"] = func() { cancelled.Store(true) }
+
+	cmd := control.Command{Cmd: "kick_disconnect", ChatroomID: 12345}
+	HandleKickDisconnect(cmd, clients, zerolog.Nop())
+
+	if !cancelled.Load() {
+		t.Fatal("expected kick client to be cancelled")
+	}
+	if _, ok := clients["kick:12345"]; ok {
+		t.Fatal("expected kick client to be removed from registry")
+	}
+}
+
+func TestHandleKickDisconnect_NoOpForUnknown(t *testing.T) {
+	clients := make(map[string]context.CancelFunc)
+	cmd := control.Command{Cmd: "kick_disconnect", ChatroomID: 99999}
+
+	HandleKickDisconnect(cmd, clients, zerolog.Nop())
+}
+
+func TestDispatchCommand_RoutesKickConnect(t *testing.T) {
+	clients := make(map[string]context.CancelFunc)
+	out := make(chan []byte, 1)
+	cmd := control.Command{Cmd: "kick_connect", ChatroomID: 777}
+
+	DispatchCommand(context.Background(), cmd, clients, out, func(string, any) {}, zerolog.Nop())
+
+	if _, ok := clients["kick:777"]; !ok {
+		t.Fatal("expected kick_connect to register client")
+	}
+	clients["kick:777"]()
+}
+
+func TestDispatchCommand_RoutesKickDisconnect(t *testing.T) {
+	var cancelled atomic.Bool
+	clients := map[string]context.CancelFunc{
+		"kick:777": func() { cancelled.Store(true) },
+	}
+	out := make(chan []byte, 1)
+	cmd := control.Command{Cmd: "kick_disconnect", ChatroomID: 777}
+
+	DispatchCommand(context.Background(), cmd, clients, out, func(string, any) {}, zerolog.Nop())
+
+	if !cancelled.Load() {
+		t.Fatal("expected kick_disconnect to cancel client")
 	}
 }

@@ -11,6 +11,7 @@ import (
 	"github.com/rs/zerolog"
 
 	"github.com/ImpulseB23/Prismoid/sidecar/internal/backoff"
+	"github.com/ImpulseB23/Prismoid/sidecar/internal/control"
 )
 
 const defaultWSURL = "wss://eventsub.wss.twitch.tv/ws"
@@ -169,8 +170,11 @@ func (c *Client) listenLoop(ctx context.Context, conn *websocket.Conn, keepalive
 			// SPSC primitive cannot evict already-written messages without a
 			// reader-side cooperation we haven't built yet. Tracked
 			// separately.
+			tagged := make([]byte, 1+len(data))
+			tagged[0] = control.TagTwitch
+			copy(tagged[1:], data)
 			select {
-			case c.Out <- data:
+			case c.Out <- tagged:
 			default:
 				c.Log.Warn().Msg("output channel full, dropping message")
 			}

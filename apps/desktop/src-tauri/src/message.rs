@@ -12,7 +12,6 @@ pub enum Platform {
     // so the frontend's discriminated union stays the single source of truth.
     #[allow(dead_code)]
     YouTube,
-    #[allow(dead_code)]
     Kick,
 }
 
@@ -203,6 +202,115 @@ pub fn parse_twitch_envelope(bytes: &[u8]) -> Result<Option<UnifiedMessage>, Par
         is_broadcaster,
         color: event.color,
         reply_to: event.reply.map(|r| r.parent_message_id),
+        emote_spans: Vec::new(),
+    }))
+}
+
+// --- Kick Pusher deserialization types (private, narrow) ---
+
+#[derive(Debug, Deserialize)]
+struct KickPusherEvent {
+    event: String,
+    #[serde(default)]
+    data: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct KickChatMessage {
+    id: String,
+    #[serde(default)]
+    #[allow(dead_code)]
+    chatroom_id: Option<i64>,
+    content: String,
+    created_at: String,
+    sender: KickSender,
+}
+
+#[derive(Debug, Deserialize)]
+struct KickSender {
+    id: i64,
+    username: String,
+    #[serde(default)]
+    identity: Option<KickIdentity>,
+}
+
+#[derive(Debug, Deserialize)]
+struct KickIdentity {
+    #[serde(default)]
+    color: Option<String>,
+    #[serde(default)]
+    badges: Vec<KickBadge>,
+}
+
+#[derive(Debug, Deserialize)]
+struct KickBadge {
+    #[serde(rename = "type")]
+    badge_type: String,
+    #[serde(default)]
+    text: Option<String>,
+}
+
+/// Parses a raw Kick Pusher channel event into a [`UnifiedMessage`] when the
+/// event is a `ChatMessageEvent`.
+///
+/// Returns `Ok(None)` for non-chat events. The Pusher `data` field is a
+/// double-encoded JSON string containing the actual chat message payload.
+pub fn parse_kick_event(bytes: &[u8]) -> Result<Option<UnifiedMessage>, ParseError> {
+    let event: KickPusherEvent = serde_json::from_slice(bytes)?;
+
+    if !event.event.contains("ChatMessageEvent") {
+        return Ok(None);
+    }
+
+    let Some(data_str) = event.data else {
+        return Ok(None);
+    };
+
+    let msg: KickChatMessage = serde_json::from_str(&data_str)?;
+
+    let platform_ts = chrono::DateTime::parse_from_rfc3339(&msg.created_at)
+        .or_else(|_| {
+            // Kick sometimes sends timestamps without timezone offset
+            chrono::NaiveDateTime::parse_from_str(&msg.created_at, "%Y-%m-%dT%H:%M:%S")
+                .map(|naive| naive.and_utc().fixed_offset())
+        })
+        .map_err(ParseError::Timestamp)?
+        .timestamp_millis();
+    let arrival_time = chrono::Utc::now().timestamp_millis();
+
+    let identity = msg.sender.identity.unwrap_or(KickIdentity {
+        color: None,
+        badges: Vec::new(),
+    });
+
+    let badges: Vec<Badge> = identity
+        .badges
+        .into_iter()
+        .map(|b| Badge {
+            set_id: b.badge_type,
+            id: b.text.unwrap_or_default(),
+        })
+        .collect();
+
+    let is_broadcaster = badges.iter().any(|b| b.set_id == "broadcaster");
+    let is_mod = is_broadcaster || badges.iter().any(|b| b.set_id == "moderator");
+    let is_subscriber = badges.iter().any(|b| b.set_id == "subscriber");
+
+    Ok(Some(UnifiedMessage {
+        id: msg.id,
+        platform: Platform::Kick,
+        timestamp: platform_ts,
+        arrival_time,
+        username: msg.sender.username.clone(),
+        display_name: msg.sender.username,
+        platform_user_id: msg.sender.id.to_string(),
+        message_text: msg.content,
+        badges,
+        is_mod,
+        is_subscriber,
+        is_broadcaster,
+        color: identity.color,
+        reply_to: None,
         emote_spans: Vec::new(),
     }))
 }
@@ -418,5 +526,62 @@ mod tests {
         let err = parse_twitch_envelope(b"}{").unwrap_err();
         let _ = err.to_string();
         assert!(std::error::Error::source(&err).is_some());
+    }
+
+    // --- Kick parser tests ---
+
+    const KICK_CHAT_EVENT: &[u8] = br##"{
+        "event": "App\\Events\\ChatMessageEvent",
+        "data": "{\"id\":\"msg-k1\",\"chatroom_id\":100,\"content\":\"hello kick\",\"type\":\"message\",\"created_at\":\"2025-06-01T12:00:00Z\",\"sender\":{\"id\":42,\"username\":\"viewer1\",\"slug\":\"viewer1\",\"identity\":{\"color\":\"#FF5733\",\"badges\":[]}}}",
+        "channel": "chatrooms.100.v2"
+    }"##;
+
+    const KICK_MOD_MSG: &[u8] = br##"{
+        "event": "App\\Events\\ChatMessageEvent",
+        "data": "{\"id\":\"msg-k2\",\"chatroom_id\":100,\"content\":\"!ban spammer\",\"type\":\"message\",\"created_at\":\"2025-06-01T12:01:00Z\",\"sender\":{\"id\":99,\"username\":\"the_mod\",\"slug\":\"the_mod\",\"identity\":{\"color\":\"#FF0000\",\"badges\":[{\"type\":\"moderator\",\"text\":\"Moderator\"},{\"type\":\"subscriber\",\"text\":\"Subscriber\"}]}}}",
+        "channel": "chatrooms.100.v2"
+    }"##;
+
+    const KICK_OTHER_EVENT: &[u8] = br##"{
+        "event": "App\\Events\\UserBannedEvent",
+        "data": "{}",
+        "channel": "chatrooms.100.v2"
+    }"##;
+
+    #[test]
+    fn parses_kick_chat_message() {
+        let msg = parse_kick_event(KICK_CHAT_EVENT).unwrap().unwrap();
+        assert_eq!(msg.id, "msg-k1");
+        assert_eq!(msg.username, "viewer1");
+        assert_eq!(msg.display_name, "viewer1");
+        assert_eq!(msg.platform_user_id, "42");
+        assert_eq!(msg.message_text, "hello kick");
+        assert_eq!(msg.color.as_deref(), Some("#FF5733"));
+        assert!(matches!(msg.platform, Platform::Kick));
+        assert!(!msg.is_mod);
+        assert!(!msg.is_subscriber);
+        assert!(!msg.is_broadcaster);
+        assert!(msg.timestamp > 0);
+    }
+
+    #[test]
+    fn parses_kick_moderator_flags() {
+        let msg = parse_kick_event(KICK_MOD_MSG).unwrap().unwrap();
+        assert!(msg.is_mod);
+        assert!(msg.is_subscriber);
+        assert!(!msg.is_broadcaster);
+        assert_eq!(msg.badges.len(), 2);
+    }
+
+    #[test]
+    fn kick_non_chat_event_returns_none() {
+        let result = parse_kick_event(KICK_OTHER_EVENT).unwrap();
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn kick_malformed_json_returns_err() {
+        let err = parse_kick_event(b"not json").unwrap_err();
+        assert!(matches!(err, ParseError::Json(_)));
     }
 }
