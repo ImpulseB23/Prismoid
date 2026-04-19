@@ -142,7 +142,14 @@ const SignIn: Component<SignInProps> = (props) => {
             </code>
             <p style={{ margin: 0, "font-size": "12px", color: "#888" }}>
               No browser?{" "}
-              <a href={p().verification_uri} target="_blank" rel="noreferrer">
+              <a
+                href="#"
+                onClick={(e) => {
+                  e.preventDefault();
+                  void openVerificationUri(p().verification_uri);
+                }}
+                style={{ color: "#9146ff" }}
+              >
                 {p().verification_uri}
               </a>
             </p>

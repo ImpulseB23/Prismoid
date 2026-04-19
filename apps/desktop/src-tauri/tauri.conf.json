@@ -35,9 +35,5 @@
       "icons/icon.ico"
     ]
   },
-  "plugins": {
-    "shell": {
-      "open": "^https://(?:id\\.twitch\\.tv|www\\.twitch\\.tv)/"
-    }
-  }
+  "plugins": {}
 }

@@ -2,7 +2,7 @@
 // apps/desktop/src-tauri/src/twitch_auth/commands.rs.
 
 import { invoke } from "@tauri-apps/api/core";
-import { open } from "@tauri-apps/plugin-shell";
+import { openUrl } from "@tauri-apps/plugin-opener";
 
 export type AuthStatusState = "logged_out" | "logged_in";
 
@@ -55,7 +55,7 @@ export function logout(): Promise<void> {
 }
 
 export function openVerificationUri(uri: string): Promise<void> {
-  return open(uri);
+  return openUrl(uri);
 }
 
 // Frontend-facing error envelope from sidecar_commands::twitch_send_message.
