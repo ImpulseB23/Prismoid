@@ -1,6 +1,7 @@
 mod host;
 mod message;
 pub mod ringbuf;
+mod sidecar_commands;
 mod sidecar_supervisor;
 pub mod twitch_auth;
 
@@ -51,6 +52,7 @@ pub fn run() {
             twitch_auth::commands::twitch_complete_login,
             twitch_auth::commands::twitch_cancel_login,
             twitch_auth::commands::twitch_logout,
+            sidecar_commands::twitch_send_message,
         ])
         .setup(setup)
         .run(tauri::generate_context!())
@@ -68,6 +70,7 @@ fn setup<R: Runtime>(app: &mut tauri::App<R>) -> Result<(), Box<dyn std::error::
     use std::sync::Arc;
     use tokio::sync::Notify;
     use twitch_auth::{AuthManager, AuthState, KeychainStore, TWITCH_CLIENT_ID};
+    use twitch_oauth2::Scope;
 
     let http_client = match reqwest::Client::builder()
         .redirect(reqwest::redirect::Policy::none())
@@ -82,17 +85,24 @@ fn setup<R: Runtime>(app: &mut tauri::App<R>) -> Result<(), Box<dyn std::error::
             return Ok(());
         }
     };
-    let auth = Arc::new(AuthManager::builder(TWITCH_CLIENT_ID).build(KeychainStore, http_client));
+    let auth = Arc::new(
+        AuthManager::builder(TWITCH_CLIENT_ID)
+            .scope(Scope::UserReadChat)
+            .scope(Scope::UserWriteChat)
+            .build(KeychainStore, http_client),
+    );
     let wakeup = Arc::new(Notify::new());
     app.manage(AuthState::new(auth.clone(), wakeup.clone()));
+    let sender = sidecar_commands::SidecarCommandSender::default();
+    app.manage(sender.clone());
 
     #[cfg(windows)]
     {
-        sidecar_supervisor::spawn(app.app_handle().clone(), auth, wakeup);
+        sidecar_supervisor::spawn(app.app_handle().clone(), auth, wakeup, sender);
     }
     #[cfg(not(windows))]
     {
-        let _ = (auth, wakeup);
+        let _ = (auth, wakeup, sender);
         tracing::warn!(
             "sidecar lifecycle is Windows-only for now; launching frontend without sidecar"
         );

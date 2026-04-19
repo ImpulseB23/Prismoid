@@ -1151,3 +1151,139 @@ func TestDispatchCommand_RoutesYouTubeDisconnect(t *testing.T) {
 		t.Fatal("expected youtube_disconnect to cancel client")
 	}
 }
+
+func TestHandleSendChatMessage_MissingFieldsRepliesWithRequestID(t *testing.T) {
+	cases := []struct {
+		name string
+		cmd  control.Command
+		want string
+	}{
+		{
+			"no broadcaster",
+			control.Command{Cmd: "send_chat_message", UserID: "u", ClientID: "c", Token: "t", Message: "hi", RequestID: 7},
+			"missing broadcaster",
+		},
+		{
+			"empty message",
+			control.Command{Cmd: "send_chat_message", BroadcasterID: "b", UserID: "u", ClientID: "c", Token: "t", RequestID: 8},
+			"empty message",
+		},
+		{
+			"oversize",
+			control.Command{Cmd: "send_chat_message", BroadcasterID: "b", UserID: "u", ClientID: "c", Token: "t", Message: strings.Repeat("a", twitch.MaxChatMessageBytes+1), RequestID: 9},
+			"exceeds",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var got SendChatResultPayload
+			var typ string
+			notify := func(t string, p any) {
+				typ = t
+				got = p.(SendChatResultPayload)
+			}
+			HandleSendChatMessage(context.Background(), tc.cmd, notify, zerolog.Nop())
+			if typ != "send_chat_result" {
+				t.Fatalf("expected send_chat_result, got %q", typ)
+			}
+			if got.RequestID != tc.cmd.RequestID {
+				t.Errorf("request_id not echoed: want %d got %d", tc.cmd.RequestID, got.RequestID)
+			}
+			if got.Ok {
+				t.Error("expected Ok=false")
+			}
+			if !strings.Contains(got.ErrorMessage, tc.want) {
+				t.Errorf("expected error containing %q, got %q", tc.want, got.ErrorMessage)
+			}
+		})
+	}
+}
+
+func TestDispatchCommand_RoutesSendChatMessage(t *testing.T) {
+	var typ string
+	notify := func(t string, p any) {
+		typ = t
+		_ = p
+	}
+	cmd := control.Command{Cmd: "send_chat_message", RequestID: 11}
+	DispatchCommand(context.Background(), cmd, map[string]context.CancelFunc{}, make(chan []byte, 1), notify, zerolog.Nop())
+	if typ != "send_chat_result" {
+		t.Fatalf("expected dispatch to invoke HandleSendChatMessage, got notify type %q", typ)
+	}
+}
+
+func TestHandleSendChatMessage_SuccessEchoesMessageID(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/chat/messages" || r.Method != http.MethodPost {
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"data":[{"message_id":"abc-123","is_sent":true}]}`)
+	}))
+	defer srv.Close()
+	prev := sendChatHelixBase
+	sendChatHelixBase = srv.URL
+	defer func() { sendChatHelixBase = prev }()
+
+	var got SendChatResultPayload
+	notify := func(_ string, p any) { got = p.(SendChatResultPayload) }
+	HandleSendChatMessage(context.Background(), control.Command{
+		Cmd:           "send_chat_message",
+		BroadcasterID: "b",
+		UserID:        "u",
+		ClientID:      "c",
+		Token:         "t",
+		Message:       "hello",
+		RequestID:     42,
+	}, notify, zerolog.Nop())
+
+	if !got.Ok || got.MessageID != "abc-123" || got.RequestID != 42 {
+		t.Fatalf("unexpected payload: %+v", got)
+	}
+}
+
+func TestHandleSendChatMessage_DropReason(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"data":[{"is_sent":false,"drop_reason":{"code":"msg_duplicate","message":"duplicate"}}]}`)
+	}))
+	defer srv.Close()
+	prev := sendChatHelixBase
+	sendChatHelixBase = srv.URL
+	defer func() { sendChatHelixBase = prev }()
+
+	var got SendChatResultPayload
+	notify := func(_ string, p any) { got = p.(SendChatResultPayload) }
+	HandleSendChatMessage(context.Background(), control.Command{
+		Cmd:           "send_chat_message",
+		BroadcasterID: "b", UserID: "u", ClientID: "c", Token: "t",
+		Message: "x", RequestID: 5,
+	}, notify, zerolog.Nop())
+
+	if got.Ok || got.DropCode != "msg_duplicate" || got.RequestID != 5 {
+		t.Fatalf("unexpected payload: %+v", got)
+	}
+}
+
+func TestHandleSendChatMessage_HelixError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusUnauthorized)
+		_, _ = io.WriteString(w, `{"error":"Unauthorized","status":401,"message":"oops"}`)
+	}))
+	defer srv.Close()
+	prev := sendChatHelixBase
+	sendChatHelixBase = srv.URL
+	defer func() { sendChatHelixBase = prev }()
+
+	var got SendChatResultPayload
+	notify := func(_ string, p any) { got = p.(SendChatResultPayload) }
+	HandleSendChatMessage(context.Background(), control.Command{
+		Cmd:           "send_chat_message",
+		BroadcasterID: "b", UserID: "u", ClientID: "c", Token: "t",
+		Message: "x", RequestID: 99,
+	}, notify, zerolog.Nop())
+
+	if got.Ok || got.ErrorMessage == "" || got.RequestID != 99 {
+		t.Fatalf("unexpected payload: %+v", got)
+	}
+}

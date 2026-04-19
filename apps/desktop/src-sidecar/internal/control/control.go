@@ -55,6 +55,16 @@ type Command struct {
 	Reason          string `json:"reason,omitempty"`
 	MessageID       string `json:"message_id,omitempty"`
 
+	// Message body for send_chat_message. Capped at 500 bytes by Twitch's
+	// Helix POST /chat/messages endpoint; the sidecar enforces the limit
+	// before issuing the request.
+	Message string `json:"message,omitempty"`
+
+	// RequestID correlates a command with its response notification (e.g.
+	// `send_chat_result`). Opaque to the sidecar; the host sets it and
+	// matches it back when the result line arrives.
+	RequestID uint64 `json:"request_id,omitempty"`
+
 	// YouTube fields
 	VideoID    string `json:"video_id,omitempty"`
 	LiveChatID string `json:"live_chat_id,omitempty"`

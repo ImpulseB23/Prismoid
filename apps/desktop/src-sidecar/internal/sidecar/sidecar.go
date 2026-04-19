@@ -288,6 +288,8 @@ func DispatchCommand(ctx context.Context, cmd control.Command, clients map[strin
 		HandleTimeoutUser(cmd, logger)
 	case "delete_message":
 		HandleDeleteMessage(cmd, logger)
+	case "send_chat_message":
+		HandleSendChatMessage(ctx, cmd, notify, logger)
 	default:
 		logger.Info().Str("cmd", cmd.Cmd).Str("channel", cmd.Channel).Msg("received command")
 	}
@@ -384,6 +386,84 @@ func HandleDeleteMessage(cmd control.Command, logger zerolog.Logger) {
 		Str("broadcaster", cmd.BroadcasterID).
 		Str("message_id", cmd.MessageID).
 		Msg("delete_message (scaffold: no Helix call yet)")
+}
+
+// SendChatResultPayload is the body of a `send_chat_result` notification
+// emitted to the host after a send_chat_message attempt. The frontend uses
+// this to surface failures (drop reasons, auth errors) without having to
+// poll any other state.
+type SendChatResultPayload struct {
+	// RequestID echoes back the command's request_id so the host can
+	// correlate this result with the awaiting Tauri invocation.
+	RequestID    uint64 `json:"request_id,omitempty"`
+	Ok           bool   `json:"ok"`
+	MessageID    string `json:"message_id,omitempty"`
+	DropCode     string `json:"drop_code,omitempty"`
+	DropMessage  string `json:"drop_message,omitempty"`
+	ErrorMessage string `json:"error_message,omitempty"`
+}
+
+// sendChatHelixBase overrides the Helix base URL used by HandleSendChatMessage
+// in tests. Empty string falls through to the production Helix endpoint.
+var sendChatHelixBase = ""
+
+// HandleSendChatMessage posts the user's message to Twitch via Helix and
+// emits a `send_chat_result` notification with either the assigned
+// message_id or the drop reason / transport error. Validation mirrors the
+// Helix endpoint so obvious misuse (empty fields, oversized body) fails
+// without consuming a request.
+func HandleSendChatMessage(ctx context.Context, cmd control.Command, notify twitch.Notify, logger zerolog.Logger) {
+	reply := func(p SendChatResultPayload) {
+		p.RequestID = cmd.RequestID
+		notify("send_chat_result", p)
+	}
+	if cmd.BroadcasterID == "" || cmd.UserID == "" || cmd.ClientID == "" || cmd.Token == "" {
+		logger.Warn().
+			Str("broadcaster", cmd.BroadcasterID).
+			Str("user", cmd.UserID).
+			Msg("send_chat_message missing required field; ignoring")
+		reply(SendChatResultPayload{
+			ErrorMessage: "missing broadcaster, user, client_id, or token",
+		})
+		return
+	}
+	if cmd.Message == "" {
+		reply(SendChatResultPayload{ErrorMessage: "empty message"})
+		return
+	}
+	if len(cmd.Message) > twitch.MaxChatMessageBytes {
+		reply(SendChatResultPayload{
+			ErrorMessage: fmt.Sprintf("message exceeds %d bytes", twitch.MaxChatMessageBytes),
+		})
+		return
+	}
+	client := &twitch.HelixClient{
+		ClientID:    cmd.ClientID,
+		AccessToken: cmd.Token,
+		BaseURL:     sendChatHelixBase,
+	}
+	resp, err := client.SendChatMessage(ctx, cmd.BroadcasterID, cmd.UserID, cmd.Message)
+	if err != nil {
+		logger.Warn().Err(err).Str("broadcaster", cmd.BroadcasterID).Msg("send_chat_message failed")
+		reply(SendChatResultPayload{ErrorMessage: err.Error()})
+		return
+	}
+	if len(resp.Data) == 0 {
+		reply(SendChatResultPayload{ErrorMessage: "empty response from helix"})
+		return
+	}
+	first := resp.Data[0]
+	if !first.IsSent {
+		reply(SendChatResultPayload{
+			DropCode:    first.DropReason.Code,
+			DropMessage: first.DropReason.Message,
+		})
+		return
+	}
+	reply(SendChatResultPayload{
+		Ok:        true,
+		MessageID: first.MessageID,
+	})
 }
 
 // HandleTwitchConnect spawns a Twitch EventSub client for the broadcaster in

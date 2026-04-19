@@ -1,6 +1,7 @@
 import { Component, Match, Switch, createSignal, onMount } from "solid-js";
 import ChatFeed from "./components/ChatFeed";
 import Header from "./components/Header";
+import MessageInput from "./components/MessageInput";
 import SignIn from "./components/SignIn";
 import { getAuthStatus, type AuthStatus } from "./lib/twitchAuth";
 
@@ -54,6 +55,7 @@ const App: Component = () => {
             <>
               <Header login={loggedIn().login} />
               <ChatFeed />
+              <MessageInput />
             </>
           )}
         </Match>
