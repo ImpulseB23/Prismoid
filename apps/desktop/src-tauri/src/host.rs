@@ -184,6 +184,43 @@ pub fn build_kick_connect_line(chatroom_id: i64) -> serde_json::Result<Vec<u8>> 
     Ok(bytes)
 }
 
+/// Arguments for [`build_send_chat_message_line`]. All fields are
+/// borrowed so the caller doesn't have to clone its credentials just to
+/// build a control line.
+pub struct SendChatMessageArgs<'a> {
+    pub client_id: &'a str,
+    pub access_token: &'a str,
+    pub broadcaster_id: &'a str,
+    pub user_id: &'a str,
+    pub message: &'a str,
+}
+
+/// Serializes a `send_chat_message` control command line for the sidecar.
+/// The Go side validates message length and emptiness against the same
+/// 500-byte Helix cap; this builder is purely a transport encoder.
+pub fn build_send_chat_message_line(args: SendChatMessageArgs<'_>) -> serde_json::Result<Vec<u8>> {
+    #[derive(Serialize)]
+    struct SendCmd<'a> {
+        cmd: &'a str,
+        client_id: &'a str,
+        token: &'a str,
+        broadcaster_id: &'a str,
+        user_id: &'a str,
+        message: &'a str,
+    }
+    let cmd = SendCmd {
+        cmd: "send_chat_message",
+        client_id: args.client_id,
+        token: args.access_token,
+        broadcaster_id: args.broadcaster_id,
+        user_id: args.user_id,
+        message: args.message,
+    };
+    let mut bytes = serde_json::to_vec(&cmd)?;
+    bytes.push(b'\n');
+    Ok(bytes)
+}
+
 /// Marks a shared memory HANDLE inheritable just before spawning a child
 /// process. See ADR 18 for why this is necessary.
 #[cfg(windows)]

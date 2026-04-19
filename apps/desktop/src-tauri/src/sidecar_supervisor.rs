@@ -44,6 +44,8 @@ use crate::message::UnifiedMessage;
 #[cfg(windows)]
 use crate::ringbuf::{RawHandle, RingBufReader, WaitOutcome, DEFAULT_CAPACITY};
 #[cfg(windows)]
+use crate::sidecar_commands::SidecarCommandSender;
+#[cfg(windows)]
 use crate::twitch_auth::{AuthError, AuthManager, TWITCH_CLIENT_ID};
 #[cfg(windows)]
 use tokio::sync::Notify;
@@ -105,10 +107,15 @@ pub struct SidecarStatus {
 /// while idle in `waiting_for_auth` so a successful sign-in starts the
 /// sidecar within milliseconds instead of waiting out the 30 s poll.
 #[cfg(windows)]
-pub fn spawn<R: Runtime>(app: AppHandle<R>, auth: Arc<AuthManager>, wakeup: Arc<Notify>) {
+pub fn spawn<R: Runtime>(
+    app: AppHandle<R>,
+    auth: Arc<AuthManager>,
+    wakeup: Arc<Notify>,
+    sender: SidecarCommandSender,
+) {
     let cfg = SupervisorConfig::default();
     tauri::async_runtime::spawn(async move {
-        supervise(app, cfg, auth, wakeup).await;
+        supervise(app, cfg, auth, wakeup, sender).await;
     });
 }
 
@@ -118,6 +125,7 @@ async fn supervise<R: Runtime>(
     cfg: SupervisorConfig,
     auth: Arc<AuthManager>,
     wakeup: Arc<Notify>,
+    sender: SidecarCommandSender,
 ) {
     // `client_id` lives in the shared AuthManager; broadcaster/user
     // identifiers ride inside the persisted [`TwitchTokens`] itself
@@ -171,10 +179,14 @@ async fn supervise<R: Runtime>(
         };
 
         let started = Instant::now();
-        match run_once(&app, &cfg, attempt, Some(&creds)).await {
+        match run_once(&app, &cfg, attempt, Some(&creds), &sender).await {
             Ok(()) => tracing::info!(attempt, "sidecar iteration ended"),
             Err(e) => tracing::error!(error = %e, attempt, "sidecar iteration failed"),
         }
+        // Always clear any lingering child handle once the iteration
+        // ends, even on error paths above. Drops the CommandChild and
+        // closes its stdin so the next iteration starts from a clean slate.
+        let _ = sender.clear();
 
         if started.elapsed() >= cfg.healthy_threshold {
             backoff = cfg.initial_backoff;
@@ -245,6 +257,7 @@ async fn run_once<R: Runtime>(
     cfg: &SupervisorConfig,
     attempt: u32,
     creds: Option<&TwitchCreds>,
+    sender: &SidecarCommandSender,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let reader = RingBufReader::create_owner(DEFAULT_CAPACITY)?;
     let handle = reader.raw_handle();
@@ -305,14 +318,13 @@ async fn run_once<R: Runtime>(
     }
 
     // Disarm the kill-on-drop: the CommandEvent stream now owns the
-    // child's lifecycle. Hold the released CommandChild in `child` for
-    // the rest of the function so its stdin stays open for the duration
-    // of the session (dropping it mid-session would close stdin and
-    // strand the control protocol). It also lets us force-kill on a
-    // heartbeat timeout without waiting for Tauri's Drop path. Wrapped
-    // in Option so the heartbeat-timeout branch can take ownership for
-    // the `kill(self)` call.
-    let mut child = Some(child.release());
+    // child's lifecycle. Publish the released CommandChild into the
+    // shared sender so Tauri commands can write control lines into its
+    // stdin for the duration of the session. The heartbeat-timeout
+    // branch below pulls it back out via `sender.clear()` for an
+    // explicit kill, and the outer `supervise` loop also clears any
+    // lingering handle once the iteration ends.
+    sender.publish(child.release());
 
     // EmoteIndex lives for the lifetime of this sidecar run; a fresh one is
     // built on every respawn. Shared by the control-plane reader (which
@@ -336,7 +348,7 @@ async fn run_once<R: Runtime>(
         attempt,
         |bytes| handle_sidecar_stdout(bytes, app, &emote_index),
         || {
-            if let Some(c) = child.take() {
+            if let Some(c) = sender.clear() {
                 if let Err(e) = c.kill() {
                     tracing::error!(error = %e, "kill after heartbeat timeout failed");
                 }

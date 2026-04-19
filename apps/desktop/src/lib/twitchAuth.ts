@@ -57,3 +57,21 @@ export function logout(): Promise<void> {
 export function openVerificationUri(uri: string): Promise<void> {
   return open(uri);
 }
+
+// Frontend-facing error envelope from sidecar_commands::twitch_send_message.
+// Mirrors the discriminated union the Rust side serializes via serde's
+// internally-tagged representation. `kind` is stable and safe to switch on.
+export type SendMessageError =
+  | { kind: "not_logged_in"; message: string }
+  | { kind: "empty_message" }
+  | { kind: "message_too_long"; max_bytes: number }
+  | { kind: "sidecar_not_running" }
+  | { kind: "io"; message: string }
+  | { kind: "auth"; message: string }
+  | { kind: "json"; message: string };
+
+export const MAX_CHAT_MESSAGE_BYTES = 500;
+
+export function sendMessage(text: string): Promise<void> {
+  return invoke("twitch_send_message", { text });
+}

@@ -265,3 +265,55 @@ type AuthError struct {
 func (e *AuthError) Error() string {
 	return fmt.Sprintf("twitch auth error (%d): %s", e.Status, e.Body)
 }
+
+// Helix limit on a single chat message body. Messages longer than this are
+// rejected with HTTP 400 by Twitch, so we mirror it locally to fail fast
+// without consuming a Helix call.
+const MaxChatMessageBytes = 500
+
+// SendChatMessageRequest is the body Twitch's POST /chat/messages expects.
+// `BroadcasterID` is the channel; `SenderID` must match the authenticated
+// user on the access token. `ReplyParentMessageID` is omitted for top-level
+// sends — reply support lives behind a follow-up control field.
+type SendChatMessageRequest struct {
+	BroadcasterID string `json:"broadcaster_id"`
+	SenderID      string `json:"sender_id"`
+	Message       string `json:"message"`
+}
+
+// SendChatMessageResponse is the envelope Twitch returns on 200. We surface
+// the per-send drop reason (e.g. AutoMod, channel followers-only) so the UI
+// can tell the user why a message did not appear.
+type SendChatMessageResponse struct {
+	Data []struct {
+		MessageID  string `json:"message_id"`
+		IsSent     bool   `json:"is_sent"`
+		DropReason struct {
+			Code    string `json:"code"`
+			Message string `json:"message"`
+		} `json:"drop_reason"`
+	} `json:"data"`
+}
+
+// SendChatMessage posts a chat message via Helix and returns the parsed
+// response. Caller is responsible for passing a non-empty message that fits
+// in [MaxChatMessageBytes]; this method validates length up front to avoid
+// a wasted round-trip.
+func (c *HelixClient) SendChatMessage(ctx context.Context, broadcasterID, senderID, message string) (*SendChatMessageResponse, error) {
+	if message == "" {
+		return nil, errors.New("twitch helix: empty chat message")
+	}
+	if len(message) > MaxChatMessageBytes {
+		return nil, fmt.Errorf("twitch helix: chat message exceeds %d bytes", MaxChatMessageBytes)
+	}
+	req := SendChatMessageRequest{
+		BroadcasterID: broadcasterID,
+		SenderID:      senderID,
+		Message:       message,
+	}
+	var resp SendChatMessageResponse
+	if err := c.Post(ctx, "/chat/messages", req, &resp); err != nil {
+		return nil, err
+	}
+	return &resp, nil
+}
