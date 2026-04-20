@@ -24,6 +24,18 @@ pub struct UnifiedMessage {
     pub platform: Platform,
     pub timestamp: i64,
     pub arrival_time: i64,
+    /// Effective sort timestamp for unified ordering across platforms.
+    /// Set by [`compute_effective_ts`] using the snap rule: trust the
+    /// platform-stamped `timestamp` when it agrees with `arrival_time`
+    /// within [`SNAP_WINDOW_MS`], else fall back to `arrival_time`. This
+    /// keeps cross-platform interleave coherent without ever reordering
+    /// already-rendered messages because of vendor clock disagreement.
+    pub effective_ts: i64,
+    /// Monotonic per-process arrival counter assigned by [`assign_arrival_seqs`].
+    /// The frontend uses `(effective_ts, arrival_seq)` as a stable sort
+    /// key so two messages with identical effective timestamps never swap
+    /// position on re-render.
+    pub arrival_seq: u64,
     pub username: String,
     pub display_name: String,
     pub platform_user_id: String,
@@ -38,6 +50,37 @@ pub struct UnifiedMessage {
     /// by [`crate::emote_index::EmoteIndex::scan_into`] after parsing.
     /// Empty when no index is active or the message has no emotes.
     pub emote_spans: Vec<EmoteSpan>,
+}
+
+/// Tolerance window for snapping `effective_ts` to the platform-stamped
+/// `timestamp`. Inside this window we trust the platform's clock; outside
+/// it we fall back to local arrival time so cross-platform interleave
+/// stays coherent. 500 ms is enough to absorb normal vendor clock skew
+/// without letting badly delayed messages time-travel up the visible list.
+pub const SNAP_WINDOW_MS: i64 = 500;
+
+/// Computes the effective sort timestamp using the snap rule documented
+/// on [`UnifiedMessage::effective_ts`]. Pure so the rule can be tested
+/// directly without going through a parser.
+#[inline]
+pub fn compute_effective_ts(timestamp: i64, arrival_time: i64) -> i64 {
+    if (timestamp - arrival_time).abs() <= SNAP_WINDOW_MS {
+        timestamp
+    } else {
+        arrival_time
+    }
+}
+
+/// Stamps every message in `batch` with a monotonic `arrival_seq`,
+/// advancing the caller-owned `next_seq` once per message. The drain loop
+/// owns the counter so seq is unique for the lifetime of one sidecar run,
+/// and the frontend's `(effective_ts, arrival_seq)` sort key remains
+/// stable.
+pub fn assign_arrival_seqs(batch: &mut [UnifiedMessage], next_seq: &mut u64) {
+    for msg in batch.iter_mut() {
+        msg.arrival_seq = *next_seq;
+        *next_seq = next_seq.wrapping_add(1);
+    }
 }
 
 #[derive(Debug)]
@@ -189,6 +232,8 @@ pub fn parse_twitch_envelope(bytes: &[u8]) -> Result<Option<UnifiedMessage>, Par
         platform: Platform::Twitch,
         timestamp: platform_ts,
         arrival_time,
+        effective_ts: 0,
+        arrival_seq: 0,
         username: event.chatter_user_login,
         display_name: event.chatter_user_name,
         platform_user_id: event.chatter_user_id,
@@ -337,6 +382,8 @@ pub fn parse_youtube_message(bytes: &[u8]) -> Result<Option<UnifiedMessage>, Par
         platform: Platform::YouTube,
         timestamp,
         arrival_time: chrono::Utc::now().timestamp_millis(),
+        effective_ts: 0,
+        arrival_seq: 0,
         username: channel_id.clone(),
         display_name,
         platform_user_id: channel_id,
@@ -447,6 +494,8 @@ pub fn parse_kick_event(bytes: &[u8]) -> Result<Option<UnifiedMessage>, ParseErr
         platform: Platform::Kick,
         timestamp: platform_ts,
         arrival_time,
+        effective_ts: 0,
+        arrival_seq: 0,
         username: msg.sender.username.clone(),
         display_name: msg.sender.username,
         platform_user_id: msg.sender.id.to_string(),
@@ -944,5 +993,89 @@ mod tests {
     fn kick_malformed_json_returns_err() {
         let err = parse_kick_event(b"not json").unwrap_err();
         assert!(matches!(err, ParseError::Json(_)));
+    }
+
+    fn fake_msg(timestamp: i64, arrival_time: i64) -> UnifiedMessage {
+        UnifiedMessage {
+            id: String::new(),
+            platform: Platform::Twitch,
+            timestamp,
+            arrival_time,
+            effective_ts: 0,
+            arrival_seq: 0,
+            username: String::new(),
+            display_name: String::new(),
+            platform_user_id: String::new(),
+            message_text: String::new(),
+            badges: Vec::new(),
+            is_mod: false,
+            is_subscriber: false,
+            is_broadcaster: false,
+            color: None,
+            reply_to: None,
+            emote_spans: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn snap_uses_platform_ts_when_within_window() {
+        // Exactly at 0 delta → trust platform.
+        assert_eq!(compute_effective_ts(1_000, 1_000), 1_000);
+        // Inside window on either side.
+        assert_eq!(compute_effective_ts(1_000, 1_400), 1_000);
+        assert_eq!(compute_effective_ts(1_400, 1_000), 1_400);
+    }
+
+    #[test]
+    fn snap_boundary_inclusive() {
+        // Delta exactly at SNAP_WINDOW_MS still trusts platform.
+        assert_eq!(compute_effective_ts(1_000, 1_000 + SNAP_WINDOW_MS), 1_000);
+        assert_eq!(
+            compute_effective_ts(1_000 + SNAP_WINDOW_MS, 1_000),
+            1_000 + SNAP_WINDOW_MS
+        );
+    }
+
+    #[test]
+    fn snap_falls_back_to_arrival_when_outside_window() {
+        // One ms past the window → arrival wins.
+        assert_eq!(
+            compute_effective_ts(1_000, 1_000 + SNAP_WINDOW_MS + 1),
+            1_000 + SNAP_WINDOW_MS + 1
+        );
+        // Negative delta past the window also flips to arrival.
+        assert_eq!(compute_effective_ts(10_000, 1_000), 1_000);
+    }
+
+    #[test]
+    fn assign_arrival_seqs_assigns_in_order_and_advances_counter() {
+        let mut batch = vec![fake_msg(0, 0), fake_msg(0, 0), fake_msg(0, 0)];
+        let mut counter: u64 = 100;
+        assign_arrival_seqs(&mut batch, &mut counter);
+        assert_eq!(batch[0].arrival_seq, 100);
+        assert_eq!(batch[1].arrival_seq, 101);
+        assert_eq!(batch[2].arrival_seq, 102);
+        assert_eq!(counter, 103);
+    }
+
+    #[test]
+    fn assign_arrival_seqs_continues_across_batches() {
+        let mut counter: u64 = 0;
+        let mut first = vec![fake_msg(0, 0), fake_msg(0, 0)];
+        assign_arrival_seqs(&mut first, &mut counter);
+        let mut second = vec![fake_msg(0, 0)];
+        assign_arrival_seqs(&mut second, &mut counter);
+        assert_eq!(first[0].arrival_seq, 0);
+        assert_eq!(first[1].arrival_seq, 1);
+        assert_eq!(second[0].arrival_seq, 2);
+        assert_eq!(counter, 3);
+    }
+
+    #[test]
+    fn assign_arrival_seqs_empty_batch_is_noop() {
+        let mut batch: Vec<UnifiedMessage> = Vec::new();
+        let mut counter: u64 = 7;
+        assign_arrival_seqs(&mut batch, &mut counter);
+        assert_eq!(counter, 7);
     }
 }

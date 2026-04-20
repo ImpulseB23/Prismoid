@@ -13,7 +13,8 @@ use serde::Serialize;
 
 use crate::emote_index::{EmoteBundle, EmoteIndex};
 use crate::message::{
-    parse_kick_event, parse_twitch_envelope, parse_youtube_message, UnifiedMessage,
+    compute_effective_ts, parse_kick_event, parse_twitch_envelope, parse_youtube_message,
+    UnifiedMessage,
 };
 use crate::ringbuf::RawHandle;
 
@@ -60,6 +61,11 @@ pub struct TwitchCreds {
 /// which keeps the hot path allocation-free and avoids copying the same
 /// URL strings into every message.
 ///
+/// The pure-data sort field [`UnifiedMessage::effective_ts`] is computed
+/// here under the snap rule. The monotonic
+/// [`UnifiedMessage::arrival_seq`] is left at zero; the drain loop owns
+/// the counter and assigns it via [`crate::message::assign_arrival_seqs`] before emit.
+///
 /// Messages that fail to parse or that aren't chat notifications are dropped
 /// with a log. Each parse is wrapped in `catch_unwind` so a panicking parser
 /// cannot kill the drain loop (`docs/stability.md` §Rust Panic Handling).
@@ -82,6 +88,7 @@ pub fn parse_batch(raw: &[Vec<u8>], batch: &mut Vec<UnifiedMessage>, emote_index
         match outcome {
             Ok(Ok(Some(mut msg))) => {
                 emote_index.scan_into(&msg.message_text, &mut msg.emote_spans);
+                msg.effective_ts = compute_effective_ts(msg.timestamp, msg.arrival_time);
                 batch.push(msg);
             }
             Ok(Ok(None)) => {}
@@ -643,6 +650,33 @@ mod tests {
         let idx = EmoteIndex::new();
         parse_batch(&raw, &mut batch, &idx);
         assert!(batch.is_empty());
+    }
+
+    /// parse_batch is responsible for stamping `effective_ts`. The platform
+    /// timestamp here is from 2023, so it's far outside the snap window
+    /// from `arrival_time` (now), which means the rule must fall back to
+    /// `arrival_time`.
+    #[test]
+    fn parse_batch_stamps_effective_ts_using_snap_rule() {
+        let viewer = tag_twitch(br##"{
+            "metadata": {"message_id":"m","message_type":"notification","message_timestamp":"2023-11-06T18:11:47.492Z"},
+            "payload": {
+                "subscription": {"type":"channel.chat.message"},
+                "event": {
+                    "chatter_user_id":"1","chatter_user_login":"u","chatter_user_name":"U",
+                    "message_id":"mid","message":{"text":"hi"}
+                }
+            }
+        }"##);
+
+        let mut batch = Vec::new();
+        let idx = EmoteIndex::new();
+        parse_batch(std::slice::from_ref(&viewer), &mut batch, &idx);
+        assert_eq!(batch.len(), 1);
+        // Far-stale platform ts → effective_ts falls back to arrival_time.
+        assert_eq!(batch[0].effective_ts, batch[0].arrival_time);
+        // arrival_seq is left at 0; the supervisor stamps it before emit.
+        assert_eq!(batch[0].arrival_seq, 0);
     }
 
     #[cfg(windows)]

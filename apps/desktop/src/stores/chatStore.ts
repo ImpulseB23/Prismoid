@@ -39,6 +39,21 @@ export interface ChatMessage {
   platform: "Twitch" | "YouTube" | "Kick";
   timestamp: number;
   arrival_time: number;
+  /**
+   * Sort timestamp under the unified-ordering snap rule (see
+   * `message.rs::compute_effective_ts`). Equals `timestamp` when the
+   * platform clock agrees with local arrival within the snap window,
+   * otherwise equals `arrival_time`. Use `(effective_ts, arrival_seq)`
+   * as a stable sort key when interleaving messages from different
+   * platforms or repositioning late arrivals.
+   */
+  effective_ts: number;
+  /**
+   * Per-process monotonic arrival counter assigned by the Rust drain
+   * loop. Tie-breaks messages with identical `effective_ts` so two
+   * renderers always agree on order.
+   */
+  arrival_seq: number;
   username: string;
   display_name: string;
   platform_user_id: string;

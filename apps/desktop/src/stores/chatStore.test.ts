@@ -7,6 +7,8 @@ function makeMsg(id: string, text = `msg ${id}`): ChatMessage {
     platform: "Twitch",
     timestamp: 0,
     arrival_time: 0,
+    effective_ts: 0,
+    arrival_seq: 0,
     username: "u",
     display_name: "U",
     platform_user_id: "1",

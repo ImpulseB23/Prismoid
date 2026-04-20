@@ -20,7 +20,7 @@ use tauri::{AppHandle, Emitter, Runtime};
 
 #[cfg(windows)]
 use std::sync::{
-    atomic::{AtomicBool, Ordering},
+    atomic::{AtomicBool, AtomicU64, Ordering},
     Arc,
 };
 #[cfg(windows)]
@@ -40,7 +40,7 @@ use crate::host::{
     SidecarEvent, TwitchCreds, SIDECAR_BINARY, SIGNAL_WAIT_TIMEOUT,
 };
 #[cfg(windows)]
-use crate::message::UnifiedMessage;
+use crate::message::{assign_arrival_seqs, UnifiedMessage};
 #[cfg(windows)]
 use crate::ringbuf::{RawHandle, RingBufReader, WaitOutcome, DEFAULT_CAPACITY};
 #[cfg(windows)]
@@ -135,6 +135,11 @@ async fn supervise<R: Runtime>(
     // (ADR 29).
     let mut attempt: u32 = 0;
     let mut backoff = cfg.initial_backoff;
+    // Per-process monotonic arrival counter. Owned by `supervise` so it
+    // survives sidecar respawns; without this, every respawn would reset
+    // `arrival_seq` to 0 and break `(effective_ts, arrival_seq)` as a
+    // stable sort key across the boundary.
+    let arrival_seq = Arc::new(AtomicU64::new(0));
 
     loop {
         attempt += 1;
@@ -179,7 +184,17 @@ async fn supervise<R: Runtime>(
         };
 
         let started = Instant::now();
-        match run_once(&app, &cfg, attempt, Some(&creds), &sender, &auth).await {
+        match run_once(
+            &app,
+            &cfg,
+            attempt,
+            Some(&creds),
+            &sender,
+            &auth,
+            &arrival_seq,
+        )
+        .await
+        {
             Ok(()) => tracing::info!(attempt, "sidecar iteration ended"),
             Err(e) => tracing::error!(error = %e, attempt, "sidecar iteration failed"),
         }
@@ -259,6 +274,7 @@ async fn run_once<R: Runtime>(
     creds: Option<&TwitchCreds>,
     sender: &SidecarCommandSender,
     auth: &Arc<AuthManager>,
+    arrival_seq: &Arc<AtomicU64>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let reader = RingBufReader::create_owner(DEFAULT_CAPACITY)?;
     let handle = reader.raw_handle();
@@ -337,8 +353,9 @@ async fn run_once<R: Runtime>(
     let drain_shutdown = shutdown.clone();
     let drain_app = app.clone();
     let drain_index = emote_index.clone();
+    let drain_seq = Arc::clone(arrival_seq);
     let drain_handle = tauri::async_runtime::spawn_blocking(move || {
-        run_drain_loop(reader, drain_app, drain_shutdown, drain_index);
+        run_drain_loop(reader, drain_app, drain_shutdown, drain_index, drain_seq);
     });
 
     emit_status(app, "running", attempt, None);
@@ -532,26 +549,36 @@ fn run_drain_loop<R: Runtime>(
     app: AppHandle<R>,
     shutdown: Arc<AtomicBool>,
     emote_index: Arc<EmoteIndex>,
+    arrival_seq: Arc<AtomicU64>,
 ) {
     let timeout_ms: u32 = SIGNAL_WAIT_TIMEOUT
         .as_millis()
         .try_into()
         .expect("signal wait timeout fits in u32 ms");
     let mut batch: Vec<UnifiedMessage> = Vec::with_capacity(64);
+    // Local mirror of the shared atomic; loaded once, written back after
+    // each emit. Only one drain loop runs at a time across the
+    // supervisor lifetime (each respawn awaits the prior `run_once`),
+    // so there are no concurrent writers and Relaxed ordering is
+    // sufficient for the load/store pair.
+    let mut next_seq: u64 = arrival_seq.load(Ordering::Relaxed);
 
     loop {
         if shutdown.load(Ordering::Acquire) {
-            drain_and_emit(&mut reader, &app, &mut batch, &emote_index);
+            drain_and_emit(&mut reader, &app, &mut batch, &emote_index, &mut next_seq);
+            arrival_seq.store(next_seq, Ordering::Relaxed);
             return;
         }
         match reader.wait_for_signal(timeout_ms) {
             Ok(WaitOutcome::Signaled) | Ok(WaitOutcome::TimedOut) => {}
             Err(e) => {
                 tracing::error!(error = %e, "wait_for_signal failed, drain loop exiting");
+                arrival_seq.store(next_seq, Ordering::Relaxed);
                 return;
             }
         }
-        drain_and_emit(&mut reader, &app, &mut batch, &emote_index);
+        drain_and_emit(&mut reader, &app, &mut batch, &emote_index, &mut next_seq);
+        arrival_seq.store(next_seq, Ordering::Relaxed);
     }
 }
 
@@ -561,6 +588,7 @@ fn drain_and_emit<R: Runtime>(
     app: &AppHandle<R>,
     batch: &mut Vec<UnifiedMessage>,
     emote_index: &EmoteIndex,
+    next_seq: &mut u64,
 ) {
     let raw = reader.drain();
     if raw.is_empty() {
@@ -571,6 +599,7 @@ fn drain_and_emit<R: Runtime>(
     if batch.is_empty() {
         return;
     }
+    assign_arrival_seqs(batch, next_seq);
     if let Err(e) = app.emit("chat_messages", &*batch) {
         tracing::error!(error = %e, "failed to emit chat_messages");
     }
