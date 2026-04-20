@@ -105,6 +105,8 @@ const StatusDot: Component<{ state: SidecarState | null }> = (props) => {
     <span
       data-testid="connection-dot"
       data-state={props.state ?? "initial"}
+      role="status"
+      aria-label={tooltip()}
       title={tooltip()}
       style={{
         display: "inline-block",
