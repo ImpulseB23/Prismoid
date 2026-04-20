@@ -63,7 +63,10 @@ export function openVerificationUri(uri: string): Promise<void> {
   } catch {
     return Promise.reject(new Error("invalid verification URL"));
   }
-  if (parsed.protocol !== "https:" || !ALLOWED_HOSTS.includes(parsed.hostname)) {
+  if (
+    parsed.protocol !== "https:" ||
+    !ALLOWED_HOSTS.includes(parsed.hostname)
+  ) {
     return Promise.reject(new Error("verification URL not on a Twitch domain"));
   }
   return openUrl(uri);

@@ -48,9 +48,9 @@ describe("openVerificationUri", () => {
   });
 
   it("rejects non-Twitch hosts", async () => {
-    await expect(
-      openVerificationUri("https://evil.com/phish"),
-    ).rejects.toThrow("verification URL not on a Twitch domain");
+    await expect(openVerificationUri("https://evil.com/phish")).rejects.toThrow(
+      "verification URL not on a Twitch domain",
+    );
   });
 
   it("rejects http URLs", async () => {

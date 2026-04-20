@@ -146,7 +146,9 @@ const SignIn: Component<SignInProps> = (props) => {
                 href={p().verification_uri}
                 onClick={(e) => {
                   e.preventDefault();
-                  void openVerificationUri(p().verification_uri).catch(() => {});
+                  void openVerificationUri(p().verification_uri).catch(
+                    () => {},
+                  );
                 }}
                 style={{ color: "#9146ff" }}
               >
