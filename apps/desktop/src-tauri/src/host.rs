@@ -516,6 +516,53 @@ mod tests {
         assert_eq!(span.emote.code.as_ref(), "Kappa");
     }
 
+    /// Verify the JSON that Tauri sends to the frontend includes emote_spans
+    /// with the expected shape, so the TypeScript `ChatMessage` type matches.
+    #[test]
+    fn emote_spans_survive_json_serialization() {
+        use crate::emote_index::{EmoteMeta, Provider};
+
+        let viewer = tag_twitch(br##"{
+            "metadata": {"message_id":"m","message_type":"notification","message_timestamp":"2023-11-06T18:11:47.492Z"},
+            "payload": {
+                "subscription": {"type":"channel.chat.message"},
+                "event": {
+                    "chatter_user_id":"1","chatter_user_login":"u","chatter_user_name":"U",
+                    "message_id":"mid","message":{"text":"hello Kappa world"}
+                }
+            }
+        }"##);
+
+        let idx = EmoteIndex::new();
+        idx.load([EmoteMeta {
+            id: "25".into(),
+            code: "Kappa".into(),
+            provider: Provider::Twitch,
+            url_1x: "https://cdn/Kappa/1x".into(),
+            url_2x: "https://cdn/Kappa/2x".into(),
+            url_4x: "https://cdn/Kappa/4x".into(),
+            width: 28,
+            height: 28,
+            animated: false,
+            zero_width: false,
+        }]);
+
+        let mut batch = Vec::new();
+        parse_batch(std::slice::from_ref(&viewer), &mut batch, &idx);
+        assert_eq!(batch.len(), 1);
+
+        let json = serde_json::to_value(&batch[0]).unwrap();
+        let spans = json["emote_spans"].as_array().unwrap();
+        assert_eq!(spans.len(), 1);
+        assert_eq!(spans[0]["start"], 6);
+        assert_eq!(spans[0]["end"], 11);
+        assert_eq!(spans[0]["emote"]["code"], "Kappa");
+        assert_eq!(spans[0]["emote"]["url_1x"], "https://cdn/Kappa/1x");
+        assert_eq!(spans[0]["emote"]["provider"], "twitch");
+        assert_eq!(spans[0]["emote"]["width"], 28);
+        assert_eq!(spans[0]["emote"]["height"], 28);
+    }
+
     #[test]
     fn parse_batch_routes_youtube_messages() {
         let yt_msg = tag_youtube(br##"{"id":"yt-1","snippet":{"type":"TEXT_MESSAGE_EVENT","published_at":"2024-01-01T00:00:00Z","display_message":"hello from yt","text_message_details":{"message_text":"hello from yt"}},"author_details":{"channel_id":"UC123","display_name":"YTUser","is_chat_owner":false,"is_chat_moderator":false,"is_chat_sponsor":false}}"##);

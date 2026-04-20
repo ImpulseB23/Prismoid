@@ -2,6 +2,7 @@ package emotes
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -117,6 +118,36 @@ func TestFetcher_NilProvidersSkipped(t *testing.T) {
 	if len(b.KickBadges.Badges) != 4 {
 		t.Errorf("kick badges = %d, want 4 even with nil providers", len(b.KickBadges.Badges))
 	}
+}
+
+// Verify that empty emote/badge slices serialize as JSON `[]` not `null`.
+// The Rust host's serde deserializer cannot parse `null` as Vec, so nil
+// slices in the Go bundle would break the entire emote pipeline.
+func TestFetcher_NilSlicesSerializeAsEmptyArray(t *testing.T) {
+	f := &Fetcher{} // all providers nil → zero-valued EmoteSets
+	b := f.Fetch(context.Background(), "42")
+
+	raw, err := json.Marshal(b)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	s := string(raw)
+
+	// Ensure no `"emotes":null` or `"badges":null` appear.
+	for _, needle := range []string{`"emotes":null`, `"badges":null`} {
+		if idx := findSubstring(s, needle); idx >= 0 {
+			t.Errorf("found %q at offset %d in marshalled bundle", needle, idx)
+		}
+	}
+}
+
+func findSubstring(s, sub string) int {
+	for i := 0; i+len(sub) <= len(s); i++ {
+		if s[i:i+len(sub)] == sub {
+			return i
+		}
+	}
+	return -1
 }
 
 func TestFetcher_RecordsProviderErrors(t *testing.T) {

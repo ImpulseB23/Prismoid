@@ -221,5 +221,30 @@ func (f *Fetcher) Fetch(ctx context.Context, broadcasterID string) Bundle {
 	wg.Wait()
 	b.YouTubeBadges = youtubeBadges
 	b.KickBadges = kickBadges
+
+	// Go serializes nil slices as JSON `null`; the Rust host expects `[]`.
+	// Ensure every slice is non-nil so the emote_bundle contract holds.
+	ensureEmoteSlice(&b.TwitchGlobalEmotes)
+	ensureEmoteSlice(&b.TwitchChannelEmotes)
+	ensureEmoteSlice(&b.SevenTVGlobal)
+	ensureEmoteSlice(&b.SevenTVChannel)
+	ensureEmoteSlice(&b.BTTVGlobal)
+	ensureEmoteSlice(&b.BTTVChannel)
+	ensureEmoteSlice(&b.FFZGlobal)
+	ensureEmoteSlice(&b.FFZChannel)
+	ensureBadgeSlice(&b.TwitchGlobalBadges)
+	ensureBadgeSlice(&b.TwitchChannelBadges)
 	return b
+}
+
+func ensureEmoteSlice(s *EmoteSet) {
+	if s.Emotes == nil {
+		s.Emotes = []Emote{}
+	}
+}
+
+func ensureBadgeSlice(s *BadgeSet) {
+	if s.Badges == nil {
+		s.Badges = []Badge{}
+	}
 }

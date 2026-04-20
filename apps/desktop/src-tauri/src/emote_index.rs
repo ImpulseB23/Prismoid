@@ -14,8 +14,20 @@ use std::sync::Arc;
 use aho_corasick::{AhoCorasick, AhoCorasickBuilder, MatchKind};
 use arc_swap::ArcSwap;
 use rustc_hash::FxHashMap;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use tracing::warn;
+
+/// Deserializes `null` as `T::default()`. Go serializes nil slices as JSON
+/// `null` rather than `[]`; `#[serde(default)]` only handles *missing*
+/// fields, so `"emotes": null` would otherwise fail with "expected a
+/// sequence". Combined with `#[serde(default)]` this covers both cases.
+fn null_to_default<'de, D, T>(deserializer: D) -> Result<T, D::Error>
+where
+    D: Deserializer<'de>,
+    T: Default + Deserialize<'de>,
+{
+    Ok(Option::<T>::deserialize(deserializer)?.unwrap_or_default())
+}
 
 /// Emote provider. Mirrors `sidecar/internal/emotes.Provider`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -64,7 +76,7 @@ pub struct EmoteMeta {
 /// them; serde's default behaviour already does so silently.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct EmoteSet {
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_to_default")]
     pub emotes: Vec<EmoteMeta>,
 }
 
@@ -90,7 +102,7 @@ pub struct Badge {
 /// for why the metadata fields are omitted.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct BadgeSet {
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_to_default")]
     pub badges: Vec<Badge>,
 }
 
@@ -639,5 +651,39 @@ mod tests {
             "https://cdn/mod/1x"
         );
         assert_eq!(reserialized["errors"][0]["error"], "boom");
+    }
+
+    #[test]
+    fn bundle_deserializes_null_emote_slices() {
+        // Go serializes nil slices as JSON `null`. The Rust side must treat
+        // `null` as an empty vec so the whole bundle doesn't fail to parse.
+        let raw = r#"{
+            "twitch_global_emotes": {"provider":"twitch","scope":"global","emotes":[
+                {"id":"1","code":"Kappa","provider":"twitch","url_1x":"https://t/1"}
+            ]},
+            "twitch_channel_emotes": {"provider":"twitch","scope":"channel","emotes":null},
+            "twitch_global_badges": {"scope":"global","badges":[]},
+            "twitch_channel_badges": {"scope":"channel","badges":null},
+            "seventv_global": {"provider":"7tv","scope":"global","emotes":[
+                {"id":"2","code":"LULW","provider":"7tv","url_1x":"https://s/2"}
+            ]},
+            "seventv_channel": {"provider":"7tv","scope":"channel","emotes":null},
+            "bttv_global": {"provider":"bttv","scope":"global","emotes":null},
+            "bttv_channel": {"provider":"bttv","scope":"channel","emotes":null},
+            "ffz_global": {"provider":"ffz","scope":"global","emotes":null},
+            "ffz_channel": {"provider":"ffz","scope":"channel","emotes":null}
+        }"#;
+        let b: EmoteBundle = serde_json::from_str(raw).unwrap();
+        assert_eq!(b.total_emotes(), 2);
+        assert!(b.bttv_channel.emotes.is_empty());
+        assert!(b.twitch_channel_badges.badges.is_empty());
+
+        // Verify the index can load from the bundle and scan works.
+        let idx = EmoteIndex::new();
+        idx.load_bundle(b);
+        let mut out = Vec::new();
+        idx.scan_into("hello LULW world", &mut out);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].emote.code.as_ref(), "LULW");
     }
 }
