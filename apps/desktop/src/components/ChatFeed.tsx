@@ -17,10 +17,16 @@ import {
 import { listen } from "@tauri-apps/api/event";
 import {
   addMessages,
+  confirmPendingId,
+  failPending,
   getMessage,
+  messageRevision,
+  retryPending,
   viewport,
   type ChatMessage,
 } from "../stores/chatStore";
+import { sendMessage, type SendMessageError } from "../lib/twitchAuth";
+import { formatSendError, toSendError } from "../lib/messageInput";
 import {
   loadBadgeBundle,
   resolveBadge,
@@ -109,6 +115,7 @@ const ChatFeed: Component = () => {
   let containerRef: HTMLDivElement | undefined;
   const entryCache = new Map<number, CachedEntry>();
   let lastBadgeRev = 0;
+  let lastMessageRev = 0;
 
   const [width, setWidth] = createSignal(0);
   const [viewportHeight, setViewportHeight] = createSignal(0);
@@ -142,6 +149,9 @@ const ChatFeed: Component = () => {
     // Read the badge revision so bundle reloads invalidate the prepared
     // cache and trigger a full re-measure.
     const rev = badgeRevision();
+    // Read the message-mutation revision so reconciled or failed
+    // pending entries re-render with their new content.
+    const msgRev = messageRevision();
     if (!fontsLoaded() || w <= 0 || v.count === 0) {
       return { messages: [], totalHeight: 0 };
     }
@@ -155,6 +165,10 @@ const ChatFeed: Component = () => {
     if (rev !== lastBadgeRev) {
       entryCache.clear();
       lastBadgeRev = rev;
+    }
+    if (msgRev !== lastMessageRev) {
+      entryCache.clear();
+      lastMessageRev = msgRev;
     }
 
     const messages: PositionedMessage[] = new Array(v.count);
@@ -306,76 +320,126 @@ const ChatFeed: Component = () => {
         }}
       >
         <For each={visibleMessages()}>
-          {(item) => (
-            <div
-              style={{
-                position: "absolute",
-                top: 0,
-                left: 0,
-                right: 0,
-                transform: `translateY(${item.top}px)`,
-                height: `${item.height}px`,
-                padding: `${MESSAGE_PADDING_Y / 2}px ${MESSAGE_PADDING_X}px`,
-                "line-height": `${MESSAGE_LINE_HEIGHT}px`,
-                "box-sizing": "border-box",
-                "font-family": MESSAGE_FONT_FAMILY,
-                "font-size": `${MESSAGE_FONT_SIZE_PX}px`,
-                "white-space": "normal",
-                "overflow-wrap": "break-word",
-              }}
-            >
-              <Show when={item.prepared.timestamp}>
+          {(item) => {
+            const status = () => item.msg.status;
+            const onRetry = () => {
+              const localId = item.msg.local_id;
+              if (!localId) return;
+              const text = retryPending(localId);
+              if (!text) return;
+              sendMessage(text).then(
+                (ok) => confirmPendingId(localId, ok.message_id),
+                (raw) => {
+                  const err = toSendError(raw);
+                  failPending(
+                    localId,
+                    typeof err === "string"
+                      ? err
+                      : formatSendError(err as SendMessageError),
+                  );
+                },
+              );
+            };
+            return (
+              <div
+                style={{
+                  position: "absolute",
+                  top: 0,
+                  left: 0,
+                  right: 0,
+                  transform: `translateY(${item.top}px)`,
+                  height: `${item.height}px`,
+                  padding: `${MESSAGE_PADDING_Y / 2}px ${MESSAGE_PADDING_X}px`,
+                  "line-height": `${MESSAGE_LINE_HEIGHT}px`,
+                  "box-sizing": "border-box",
+                  "font-family": MESSAGE_FONT_FAMILY,
+                  "font-size": `${MESSAGE_FONT_SIZE_PX}px`,
+                  "white-space": "normal",
+                  "overflow-wrap": "break-word",
+                  opacity: status() === "pending" ? 0.55 : 1,
+                  "border-left":
+                    status() === "failed"
+                      ? "2px solid #f5a3a3"
+                      : "2px solid transparent",
+                  cursor: status() === "failed" ? "pointer" : "default",
+                }}
+                title={
+                  status() === "failed"
+                    ? `${item.msg.error_message ?? "send failed"} (click or press Enter to retry)`
+                    : undefined
+                }
+                role={status() === "failed" ? "button" : undefined}
+                tabIndex={status() === "failed" ? 0 : undefined}
+                aria-label={
+                  status() === "failed"
+                    ? `Send failed: ${item.msg.error_message ?? "unknown error"}. Activate to retry.`
+                    : undefined
+                }
+                onClick={status() === "failed" ? onRetry : undefined}
+                onKeyDown={
+                  status() === "failed"
+                    ? (e: KeyboardEvent) => {
+                        if (e.key === "Enter" || e.key === " ") {
+                          e.preventDefault();
+                          onRetry();
+                        }
+                      }
+                    : undefined
+                }
+              >
+                <Show when={item.prepared.timestamp}>
+                  <span
+                    style={{
+                      color: "#6e6e72",
+                      "white-space": "pre",
+                    }}
+                  >
+                    {item.prepared.timestamp}
+                  </span>
+                </Show>
+                <For each={item.prepared.badges}>
+                  {(b) => (
+                    <img
+                      src={b.badge.url_1x}
+                      srcset={
+                        b.badge.url_2x
+                          ? `${b.badge.url_1x} 1x, ${b.badge.url_2x} 2x${
+                              b.badge.url_4x ? `, ${b.badge.url_4x} 4x` : ""
+                            }`
+                          : undefined
+                      }
+                      alt={b.badge.title}
+                      title={b.badge.title}
+                      width={BADGE_SIZE_PX}
+                      height={BADGE_SIZE_PX}
+                      draggable={false}
+                      style={{
+                        display: "inline-block",
+                        "vertical-align": "middle",
+                        "margin-right": `${BADGE_GAP_PX}px`,
+                      }}
+                    />
+                  )}
+                </For>
                 <span
                   style={{
-                    color: "#6e6e72",
-                    "white-space": "pre",
+                    color: normalizeUserColor(item.msg.color),
+                    "font-weight": 700,
+                    // Keep DOM in lockstep with Pretext's `break: "never"`
+                    // on the username segment so heights stay accurate even
+                    // for very long display names.
+                    "white-space": "nowrap",
                   }}
                 >
-                  {item.prepared.timestamp}
+                  {item.msg.display_name}
                 </span>
-              </Show>
-              <For each={item.prepared.badges}>
-                {(b) => (
-                  <img
-                    src={b.badge.url_1x}
-                    srcset={
-                      b.badge.url_2x
-                        ? `${b.badge.url_1x} 1x, ${b.badge.url_2x} 2x${
-                            b.badge.url_4x ? `, ${b.badge.url_4x} 4x` : ""
-                          }`
-                        : undefined
-                    }
-                    alt={b.badge.title}
-                    title={b.badge.title}
-                    width={BADGE_SIZE_PX}
-                    height={BADGE_SIZE_PX}
-                    draggable={false}
-                    style={{
-                      display: "inline-block",
-                      "vertical-align": "middle",
-                      "margin-right": `${BADGE_GAP_PX}px`,
-                    }}
-                  />
-                )}
-              </For>
-              <span
-                style={{
-                  color: normalizeUserColor(item.msg.color),
-                  "font-weight": 700,
-                  // Keep DOM in lockstep with Pretext's `break: "never"`
-                  // on the username segment so heights stay accurate even
-                  // for very long display names.
-                  "white-space": "nowrap",
-                }}
-              >
-                {item.msg.display_name}
-              </span>
-              <span style={{ color: "#adadb8" }}>: </span>
-              <For each={item.prepared.pieces}>
-                {(piece) => renderPiece(piece)}
-              </For>
-            </div>
-          )}
+                <span style={{ color: "#adadb8" }}>: </span>
+                <For each={item.prepared.pieces}>
+                  {(piece) => renderPiece(piece)}
+                </For>
+              </div>
+            );
+          }}
         </For>
       </div>
     </div>

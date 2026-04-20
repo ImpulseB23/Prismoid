@@ -330,11 +330,10 @@ pub struct SendChatResult {
     #[serde(default)]
     pub request_id: u64,
     pub ok: bool,
-    /// Helix-assigned id for a successfully accepted message. Currently
-    /// surfaced into `send_chat_result` for future echo-suppression /
-    /// optimistic-render confirmation; not consumed by the dispatcher
-    /// itself.
-    #[allow(dead_code)]
+    /// Helix-assigned id for a successfully accepted message. Surfaced
+    /// to the frontend by `twitch_send_message` so the optimistic
+    /// renderer can correlate the locally-inserted pending message with
+    /// the authoritative EventSub echo.
     #[serde(default)]
     pub message_id: String,
     #[serde(default)]

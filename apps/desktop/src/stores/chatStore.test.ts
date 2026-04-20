@@ -1,5 +1,9 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import { createChatStore, type ChatMessage } from "./chatStore";
+import {
+  buildOptimisticMessage,
+  createChatStore,
+  type ChatMessage,
+} from "./chatStore";
 
 function makeMsg(id: string, text = `msg ${id}`): ChatMessage {
   return {
@@ -20,6 +24,25 @@ function makeMsg(id: string, text = `msg ${id}`): ChatMessage {
     color: null,
     reply_to: null,
     emote_spans: [],
+  };
+}
+
+function makeAuthoritative(
+  pending: ChatMessage,
+  overrides: Partial<ChatMessage> = {},
+): ChatMessage {
+  return {
+    ...makeMsg("from-platform", pending.message_text),
+    platform: pending.platform,
+    username: pending.username,
+    arrival_time: pending.arrival_time + 200,
+    timestamp: pending.arrival_time + 150,
+    effective_ts: pending.arrival_time + 150,
+    display_name: pending.username.toUpperCase(),
+    platform_user_id: "real-id",
+    badges: [{ set_id: "subscriber", id: "1" }],
+    color: "#ff8800",
+    ...overrides,
   };
 }
 
@@ -148,5 +171,268 @@ describe("chatStore", () => {
     expect(rafSpy).toHaveBeenCalledTimes(2);
 
     rafSpy.mockRestore();
+  });
+});
+
+describe("chatStore optimistic send", () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("buildOptimisticMessage marks status pending and assigns a local_id", () => {
+    const msg = buildOptimisticMessage({
+      platform: "Twitch",
+      login: "alice",
+      text: "hi",
+    });
+    expect(msg.status).toBe("pending");
+    expect(msg.local_id).toBeTruthy();
+    expect(msg.id).toBe(msg.local_id);
+    expect(msg.username).toBe("alice");
+    expect(msg.display_name).toBe("alice");
+    expect(msg.message_text).toBe("hi");
+    expect(msg.effective_ts).toBe(msg.arrival_time);
+  });
+
+  it("insertPending appends to ring and bumps viewport", () => {
+    const store = createChatStore(10);
+    const pending = buildOptimisticMessage({
+      platform: "Twitch",
+      login: "alice",
+      text: "hi",
+    });
+    store.insertPending(pending);
+    vi.runAllTimers();
+    expect(store.viewport()).toEqual({ start: 0, count: 1 });
+    expect(store.getMessage(0)?.status).toBe("pending");
+  });
+
+  it("addMessages reconciles incoming echo against pending by fingerprint", () => {
+    const store = createChatStore(10);
+    const pending = buildOptimisticMessage({
+      platform: "Twitch",
+      login: "alice",
+      text: "hi",
+    });
+    store.insertPending(pending);
+    vi.runAllTimers();
+
+    const auth = makeAuthoritative(pending);
+    store.addMessages([auth]);
+    vi.runAllTimers();
+
+    // Echo did NOT append a second message; it merged into the pending entry.
+    expect(store.viewport().count).toBe(1);
+    const merged = store.getMessage(0)!;
+    expect(merged.status).toBeUndefined();
+    expect(merged.id).toBe("from-platform");
+    expect(merged.display_name).toBe("ALICE");
+    expect(merged.color).toBe("#ff8800");
+    expect(merged.badges).toHaveLength(1);
+  });
+
+  it("addMessages reconciles by id once confirmPendingId is called", () => {
+    const store = createChatStore(10);
+    const pending = buildOptimisticMessage({
+      platform: "Twitch",
+      login: "alice",
+      text: "hello",
+    });
+    store.insertPending(pending);
+    store.confirmPendingId(pending.local_id!, "helix-xyz");
+    vi.runAllTimers();
+
+    // Echo with matching id but DIFFERENT text still reconciles by id,
+    // because the platform may normalize text in transit.
+    const echo = makeAuthoritative(pending, {
+      id: "helix-xyz",
+      message_text: "hello",
+    });
+    store.addMessages([echo]);
+    vi.runAllTimers();
+
+    expect(store.viewport().count).toBe(1);
+    expect(store.getMessage(0)?.status).toBeUndefined();
+    expect(store.getMessage(0)?.id).toBe("helix-xyz");
+  });
+
+  it("does not reconcile when fingerprint window has elapsed", () => {
+    const store = createChatStore(10);
+    const pending = buildOptimisticMessage({
+      platform: "Twitch",
+      login: "alice",
+      text: "hi",
+    });
+    pending.arrival_time = 0;
+    store.insertPending(pending);
+
+    const stale = makeAuthoritative(pending);
+    stale.arrival_time = 60_000; // far outside window
+    store.addMessages([stale]);
+    vi.runAllTimers();
+
+    // Both kept: pending stays, stale is appended as a separate entry.
+    expect(store.viewport().count).toBe(2);
+    expect(store.getMessage(0)?.status).toBe("pending");
+    expect(store.getMessage(1)?.status).toBeUndefined();
+  });
+
+  it("does not reconcile across platforms even with identical text", () => {
+    const store = createChatStore(10);
+    const pending = buildOptimisticMessage({
+      platform: "Twitch",
+      login: "alice",
+      text: "hi",
+    });
+    store.insertPending(pending);
+
+    const echoOtherPlatform = makeAuthoritative(pending, {
+      platform: "YouTube",
+    });
+    store.addMessages([echoOtherPlatform]);
+    vi.runAllTimers();
+
+    expect(store.viewport().count).toBe(2);
+    expect(store.getMessage(0)?.status).toBe("pending");
+  });
+
+  it("failPending stamps error and bumps messageRevision", () => {
+    const store = createChatStore(10);
+    const pending = buildOptimisticMessage({
+      platform: "Twitch",
+      login: "alice",
+      text: "hi",
+    });
+    store.insertPending(pending);
+    vi.runAllTimers();
+
+    const revBefore = store.messageRevision();
+    store.failPending(pending.local_id!, "rate limited");
+    vi.runAllTimers();
+
+    expect(store.getMessage(0)?.status).toBe("failed");
+    expect(store.getMessage(0)?.error_message).toBe("rate limited");
+    expect(store.messageRevision()).toBeGreaterThan(revBefore);
+  });
+
+  it("retryPending only flips a failed entry back to pending", () => {
+    const store = createChatStore(10);
+    const pending = buildOptimisticMessage({
+      platform: "Twitch",
+      login: "alice",
+      text: "retry me",
+    });
+    store.insertPending(pending);
+
+    // No-op while still pending.
+    expect(store.retryPending(pending.local_id!)).toBeUndefined();
+
+    store.failPending(pending.local_id!, "boom");
+    const text = store.retryPending(pending.local_id!);
+    expect(text).toBe("retry me");
+    expect(store.getMessage(0)?.status).toBe("pending");
+    expect(store.getMessage(0)?.error_message).toBeUndefined();
+  });
+
+  it("confirmPendingId is a no-op when local_id is unknown", () => {
+    const store = createChatStore(10);
+    // Should not throw.
+    store.confirmPendingId("never-existed", "helix-1");
+  });
+
+  it("scan is bounded and ignores pending entries past PENDING_SCAN_TAIL", () => {
+    const store = createChatStore(200);
+    const oldPending = buildOptimisticMessage({
+      platform: "Twitch",
+      login: "alice",
+      text: "old one",
+    });
+    store.insertPending(oldPending);
+
+    // Push 100 unrelated messages so the pending falls outside the
+    // 64-entry reconciliation tail.
+    const filler: ChatMessage[] = [];
+    for (let i = 0; i < 100; i++) filler.push(makeMsg(`f${i}`));
+    store.addMessages(filler);
+
+    const echo = makeAuthoritative(oldPending);
+    store.addMessages([echo]);
+    vi.runAllTimers();
+
+    // Echo could not find the pending entry: it appends as a normal msg
+    // and the original pending stays in pending state.
+    expect(store.getMessage(0)?.status).toBe("pending");
+  });
+
+  it("multiple pending messages reconcile in submit order via fingerprint", () => {
+    const store = createChatStore(20);
+    const a = buildOptimisticMessage({
+      platform: "Twitch",
+      login: "alice",
+      text: "first",
+    });
+    const b = buildOptimisticMessage({
+      platform: "Twitch",
+      login: "alice",
+      text: "second",
+    });
+    store.insertPending(a);
+    store.insertPending(b);
+    vi.runAllTimers();
+
+    store.addMessages([makeAuthoritative(a, { id: "id-a" })]);
+    store.addMessages([makeAuthoritative(b, { id: "id-b" })]);
+    vi.runAllTimers();
+
+    expect(store.viewport().count).toBe(2);
+    expect(store.getMessage(0)?.id).toBe("id-a");
+    expect(store.getMessage(1)?.id).toBe("id-b");
+    expect(store.getMessage(0)?.status).toBeUndefined();
+    expect(store.getMessage(1)?.status).toBeUndefined();
+  });
+
+  it("reconciles a failed entry when the platform echo arrives late", () => {
+    const store = createChatStore(10);
+    const pending = buildOptimisticMessage({
+      platform: "Twitch",
+      login: "alice",
+      text: "hi",
+    });
+    store.insertPending(pending);
+    store.failPending(pending.local_id!, "ambiguous timeout");
+    vi.runAllTimers();
+    expect(store.getMessage(0)?.status).toBe("failed");
+
+    store.addMessages([makeAuthoritative(pending)]);
+    vi.runAllTimers();
+
+    expect(store.viewport().count).toBe(1);
+    const merged = store.getMessage(0)!;
+    expect(merged.status).toBeUndefined();
+    expect(merged.error_message).toBeUndefined();
+    expect(merged.id).toBe("from-platform");
+  });
+
+  it("reconcile clears local_id and adopts authoritative username", () => {
+    const store = createChatStore(10);
+    const pending = buildOptimisticMessage({
+      platform: "Twitch",
+      login: "alice",
+      text: "hi",
+    });
+    store.insertPending(pending);
+    store.addMessages([
+      makeAuthoritative(pending, { display_name: "AliceCool" }),
+    ]);
+    vi.runAllTimers();
+
+    const merged = store.getMessage(0)!;
+    expect(merged.local_id).toBeUndefined();
+    expect(merged.display_name).toBe("AliceCool");
+    // After clearing local_id, retryPending must not find the entry.
+    expect(store.retryPending(pending.local_id!)).toBeUndefined();
   });
 });

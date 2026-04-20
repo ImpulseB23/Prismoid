@@ -266,9 +266,11 @@ impl SendCommandError {
         }
     }
 
-    fn from_send_result(r: SendChatResult) -> Result<(), Self> {
+    fn from_send_result(r: SendChatResult) -> Result<SendChatOk, Self> {
         if r.ok {
-            return Ok(());
+            return Ok(SendChatOk {
+                message_id: r.message_id,
+            });
         }
         if !r.drop_code.is_empty() || !r.drop_message.is_empty() {
             return Err(Self::Helix {
@@ -289,6 +291,15 @@ impl SendCommandError {
             },
         })
     }
+}
+
+/// Success payload returned to the frontend by `twitch_send_message`.
+/// Carries the Helix-assigned message id so the optimistic renderer
+/// can correlate the locally-inserted pending message with its
+/// authoritative EventSub echo.
+#[derive(Debug, Clone, Serialize)]
+pub struct SendChatOk {
+    pub message_id: String,
 }
 
 /// Maximum chat message length accepted by Twitch Helix POST
@@ -327,7 +338,7 @@ pub async fn twitch_send_message(
     auth: State<'_, AuthState>,
     sender: State<'_, SidecarCommandSender>,
     text: String,
-) -> Result<(), SendCommandError> {
+) -> Result<SendChatOk, SendCommandError> {
     let trimmed = validate_message(&text)?;
 
     let tokens = auth
@@ -388,8 +399,10 @@ mod tests {
     }
 
     #[test]
-    fn from_send_result_ok_is_ok() {
-        assert!(SendCommandError::from_send_result(make_result(true, "", "", "")).is_ok());
+    fn from_send_result_ok_returns_message_id() {
+        let ok = SendCommandError::from_send_result(make_result(true, "", "", ""))
+            .expect("ok result must succeed");
+        assert_eq!(ok.message_id, "abc");
     }
 
     #[test]
