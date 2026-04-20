@@ -54,7 +54,18 @@ export function logout(): Promise<void> {
   return invoke("twitch_logout");
 }
 
+const ALLOWED_HOSTS = ["www.twitch.tv", "id.twitch.tv"];
+
 export function openVerificationUri(uri: string): Promise<void> {
+  let parsed: URL;
+  try {
+    parsed = new URL(uri);
+  } catch {
+    return Promise.reject(new Error("invalid verification URL"));
+  }
+  if (parsed.protocol !== "https:" || !ALLOWED_HOSTS.includes(parsed.hostname)) {
+    return Promise.reject(new Error("verification URL not on a Twitch domain"));
+  }
   return openUrl(uri);
 }
 

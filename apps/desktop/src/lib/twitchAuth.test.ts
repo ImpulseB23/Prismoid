@@ -6,11 +6,15 @@ vi.mock("@tauri-apps/api/core", () => ({
   invoke: (...args: unknown[]) => invokeMock(...args),
 }));
 
-vi.mock("@tauri-apps/plugin-shell", () => ({
-  open: vi.fn(),
+vi.mock("@tauri-apps/plugin-opener", () => ({
+  openUrl: vi.fn().mockResolvedValue(undefined),
 }));
 
-import { sendMessage, MAX_CHAT_MESSAGE_BYTES } from "./twitchAuth";
+import {
+  sendMessage,
+  openVerificationUri,
+  MAX_CHAT_MESSAGE_BYTES,
+} from "./twitchAuth";
 
 afterEach(() => {
   invokeMock.mockReset();
@@ -33,5 +37,31 @@ describe("sendMessage", () => {
 
   it("exposes the byte cap matching the Rust constant", () => {
     expect(MAX_CHAT_MESSAGE_BYTES).toBe(500);
+  });
+});
+
+describe("openVerificationUri", () => {
+  it("allows a valid Twitch verification URL", async () => {
+    await expect(
+      openVerificationUri("https://www.twitch.tv/activate"),
+    ).resolves.toBeUndefined();
+  });
+
+  it("rejects non-Twitch hosts", async () => {
+    await expect(
+      openVerificationUri("https://evil.com/phish"),
+    ).rejects.toThrow("verification URL not on a Twitch domain");
+  });
+
+  it("rejects http URLs", async () => {
+    await expect(
+      openVerificationUri("http://www.twitch.tv/activate"),
+    ).rejects.toThrow("verification URL not on a Twitch domain");
+  });
+
+  it("rejects invalid URLs", async () => {
+    await expect(openVerificationUri("not-a-url")).rejects.toThrow(
+      "invalid verification URL",
+    );
   });
 });
