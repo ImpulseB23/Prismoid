@@ -19,6 +19,7 @@ const MessageInput: Component = () => {
   const [text, setText] = createSignal("");
   const [status, setStatus] = createSignal<string | null>(null);
   let inputEl: HTMLInputElement | undefined;
+  let sendSeq = 0;
 
   const submit = () => {
     const payload = normalizeOutgoing(text());
@@ -30,11 +31,14 @@ const MessageInput: Component = () => {
       setStatus(`Message exceeds ${MAX_CHAT_MESSAGE_BYTES} bytes.`);
       return;
     }
+    const seq = ++sendSeq;
     setText("");
     setStatus(null);
     inputEl?.focus();
 
     sendMessage(payload).catch((raw) => {
+      if (seq !== sendSeq) return;
+      if (!text()) setText(payload);
       const err = toSendError(raw);
       setStatus(
         typeof err === "string"
