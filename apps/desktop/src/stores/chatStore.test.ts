@@ -393,4 +393,46 @@ describe("chatStore optimistic send", () => {
     expect(store.getMessage(0)?.status).toBeUndefined();
     expect(store.getMessage(1)?.status).toBeUndefined();
   });
+
+  it("reconciles a failed entry when the platform echo arrives late", () => {
+    const store = createChatStore(10);
+    const pending = buildOptimisticMessage({
+      platform: "Twitch",
+      login: "alice",
+      text: "hi",
+    });
+    store.insertPending(pending);
+    store.failPending(pending.local_id!, "ambiguous timeout");
+    vi.runAllTimers();
+    expect(store.getMessage(0)?.status).toBe("failed");
+
+    store.addMessages([makeAuthoritative(pending)]);
+    vi.runAllTimers();
+
+    expect(store.viewport().count).toBe(1);
+    const merged = store.getMessage(0)!;
+    expect(merged.status).toBeUndefined();
+    expect(merged.error_message).toBeUndefined();
+    expect(merged.id).toBe("from-platform");
+  });
+
+  it("reconcile clears local_id and adopts authoritative username", () => {
+    const store = createChatStore(10);
+    const pending = buildOptimisticMessage({
+      platform: "Twitch",
+      login: "alice",
+      text: "hi",
+    });
+    store.insertPending(pending);
+    store.addMessages([
+      makeAuthoritative(pending, { display_name: "AliceCool" }),
+    ]);
+    vi.runAllTimers();
+
+    const merged = store.getMessage(0)!;
+    expect(merged.local_id).toBeUndefined();
+    expect(merged.display_name).toBe("AliceCool");
+    // After clearing local_id, retryPending must not find the entry.
+    expect(store.retryPending(pending.local_id!)).toBeUndefined();
+  });
 });

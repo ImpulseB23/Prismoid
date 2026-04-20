@@ -33,6 +33,12 @@ const MessageInput: Component<Props> = (props) => {
   const [text, setText] = createSignal("");
   const [status, setStatus] = createSignal<string | null>(null);
   let inputEl: HTMLInputElement | undefined;
+  // Per-input monotonic counter. Pending-entry mutations are already
+  // safely keyed by `local_id`, but the inline status string is shared
+  // across submits, so a slower earlier rejection could otherwise stomp
+  // a newer success. We snapshot the seq at submit time and only let
+  // the handler call `setStatus` when its snapshot is still the latest.
+  let lastSubmitSeq = 0;
 
   const submit = () => {
     const payload = normalizeOutgoing(text());
@@ -55,6 +61,7 @@ const MessageInput: Component<Props> = (props) => {
     });
     insertPending(optimistic);
     const localId = optimistic.local_id!;
+    const submitSeq = ++lastSubmitSeq;
 
     sendMessage(payload).then(
       (ok) => {
@@ -67,7 +74,7 @@ const MessageInput: Component<Props> = (props) => {
             ? err
             : formatSendError(err as SendMessageError);
         failPending(localId, message);
-        setStatus(message);
+        if (submitSeq === lastSubmitSeq) setStatus(message);
       },
     );
   };

@@ -365,10 +365,27 @@ const ChatFeed: Component = () => {
                 }}
                 title={
                   status() === "failed"
-                    ? `${item.msg.error_message ?? "send failed"} (click to retry)`
+                    ? `${item.msg.error_message ?? "send failed"} (click or press Enter to retry)`
+                    : undefined
+                }
+                role={status() === "failed" ? "button" : undefined}
+                tabIndex={status() === "failed" ? 0 : undefined}
+                aria-label={
+                  status() === "failed"
+                    ? `Send failed: ${item.msg.error_message ?? "unknown error"}. Activate to retry.`
                     : undefined
                 }
                 onClick={status() === "failed" ? onRetry : undefined}
+                onKeyDown={
+                  status() === "failed"
+                    ? (e: KeyboardEvent) => {
+                        if (e.key === "Enter" || e.key === " ") {
+                          e.preventDefault();
+                          onRetry();
+                        }
+                      }
+                    : undefined
+                }
               >
                 <Show when={item.prepared.timestamp}>
                   <span

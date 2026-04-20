@@ -90,9 +90,9 @@ export interface Viewport {
 
 /**
  * Window for matching an authoritative platform echo to a still-pending
- * optimistic message by fingerprint (platform + author + normalized
- * text). Generous enough to absorb sidecar cold-start latency without
- * letting genuine duplicates collapse onto stale pending entries.
+ * optimistic message by fingerprint (platform + author + message text).
+ * Generous enough to absorb sidecar cold-start latency without letting
+ * genuine duplicates collapse onto stale pending entries.
  */
 export const PENDING_FINGERPRINT_WINDOW_MS = 30_000;
 
@@ -152,7 +152,7 @@ export const DEFAULT_MAX_MESSAGES = 5000;
  * at 0 and increments once per emitted message) so that when a future
  * sort layer compares `(effective_ts, arrival_seq)` across the ring,
  * pending entries naturally sort to the tail. Each pending insert
- * decrements the local counter from the same high base so multiple
+ * increments the local counter from the same high base so multiple
  * concurrent pending messages still preserve submit order.
  */
 const OPTIMISTIC_SEQ_BASE = Number.MAX_SAFE_INTEGER - 1_000_000;
@@ -272,7 +272,12 @@ export function createChatStore(maxMessages = DEFAULT_MAX_MESSAGES): ChatStore {
     const tailStart = Math.max(0, writeIndex - PENDING_SCAN_TAIL);
     for (let mono = writeIndex - 1; mono >= tailStart; mono--) {
       const entry = ring[mono % maxMessages];
-      if (!entry || entry.status !== "pending") continue;
+      // Reconcile against both pending and failed optimistic entries:
+      // a transport error followed by the platform echo arriving anyway
+      // (e.g. ambiguous timeout, retried by us elsewhere) should heal
+      // the failed entry instead of leaving it red beside a duplicate.
+      if (!entry || (entry.status !== "pending" && entry.status !== "failed"))
+        continue;
       if (entry.platform !== incoming.platform) continue;
       const idMatch = entry.id === incoming.id && entry.id.length > 0;
       const fingerprintMatch =
@@ -281,8 +286,9 @@ export function createChatStore(maxMessages = DEFAULT_MAX_MESSAGES): ChatStore {
         Math.abs(incoming.arrival_time - entry.arrival_time) <
           PENDING_FINGERPRINT_WINDOW_MS;
       if (!idMatch && !fingerprintMatch) continue;
+      const localId = entry.local_id;
       reconcileEntry(entry, incoming);
-      if (entry.local_id) pendingByLocalId.delete(entry.local_id);
+      if (localId) pendingByLocalId.delete(localId);
       return true;
     }
     return false;
@@ -290,11 +296,14 @@ export function createChatStore(maxMessages = DEFAULT_MAX_MESSAGES): ChatStore {
 
   function reconcileEntry(entry: ChatMessage, incoming: ChatMessage): void {
     // Adopt authoritative identity and rendering data, but keep the
-    // optimistic position (arrival_seq) so the row doesn't jump.
+    // optimistic position (arrival_seq) so the row doesn't jump. The
+    // entry is no longer optimistic after this, so drop status,
+    // local_id, and any prior error string.
     entry.id = incoming.id;
     entry.timestamp = incoming.timestamp;
     entry.arrival_time = incoming.arrival_time;
     entry.effective_ts = incoming.effective_ts;
+    entry.username = incoming.username;
     entry.display_name = incoming.display_name;
     entry.platform_user_id = incoming.platform_user_id;
     entry.message_text = incoming.message_text;
@@ -307,6 +316,7 @@ export function createChatStore(maxMessages = DEFAULT_MAX_MESSAGES): ChatStore {
     entry.emote_spans = incoming.emote_spans;
     entry.status = undefined;
     entry.error_message = undefined;
+    entry.local_id = undefined;
   }
 
   function addMessages(batch: ChatMessage[]): void {
