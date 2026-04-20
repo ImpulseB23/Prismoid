@@ -14,12 +14,25 @@ import {
   normalizeOutgoing,
   toSendError,
 } from "../lib/messageInput";
+import {
+  buildOptimisticMessage,
+  confirmPendingId,
+  failPending,
+  insertPending,
+} from "../stores/chatStore";
 
-const MessageInput: Component = () => {
+interface Props {
+  /** Current Twitch login of the signed-in user. Used as both the
+   * username and provisional display name on the optimistic message;
+   * the authoritative EventSub echo replaces both fields when it
+   * arrives. */
+  login: string;
+}
+
+const MessageInput: Component<Props> = (props) => {
   const [text, setText] = createSignal("");
   const [status, setStatus] = createSignal<string | null>(null);
   let inputEl: HTMLInputElement | undefined;
-  let sendSeq = 0;
 
   const submit = () => {
     const payload = normalizeOutgoing(text());
@@ -31,21 +44,32 @@ const MessageInput: Component = () => {
       setStatus(`Message exceeds ${MAX_CHAT_MESSAGE_BYTES} bytes.`);
       return;
     }
-    const seq = ++sendSeq;
     setText("");
     setStatus(null);
     inputEl?.focus();
 
-    sendMessage(payload).catch((raw) => {
-      if (seq !== sendSeq) return;
-      if (!text()) setText(payload);
-      const err = toSendError(raw);
-      setStatus(
-        typeof err === "string"
-          ? err
-          : formatSendError(err as SendMessageError),
-      );
+    const optimistic = buildOptimisticMessage({
+      platform: "Twitch",
+      login: props.login,
+      text: payload,
     });
+    insertPending(optimistic);
+    const localId = optimistic.local_id!;
+
+    sendMessage(payload).then(
+      (ok) => {
+        confirmPendingId(localId, ok.message_id);
+      },
+      (raw) => {
+        const err = toSendError(raw);
+        const message =
+          typeof err === "string"
+            ? err
+            : formatSendError(err as SendMessageError);
+        failPending(localId, message);
+        setStatus(message);
+      },
+    );
   };
 
   const onKeyDown = (e: KeyboardEvent) => {

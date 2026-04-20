@@ -87,6 +87,14 @@ export type SendMessageError =
 
 export const MAX_CHAT_MESSAGE_BYTES = 500;
 
-export function sendMessage(text: string): Promise<void> {
+/** Success payload from `twitch_send_message`. Mirrors `SendChatOk`
+ * on the Rust side. The `message_id` is the Helix-assigned id, used
+ * by the optimistic renderer to correlate a pending entry with its
+ * authoritative EventSub echo. */
+export interface SendMessageOk {
+  message_id: string;
+}
+
+export function sendMessage(text: string): Promise<SendMessageOk> {
   return invoke("twitch_send_message", { text });
 }

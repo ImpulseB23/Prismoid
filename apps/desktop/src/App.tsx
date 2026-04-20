@@ -55,7 +55,7 @@ const App: Component = () => {
             <>
               <Header login={loggedIn().login} />
               <ChatFeed />
-              <MessageInput />
+              <MessageInput login={loggedIn().login} />
             </>
           )}
         </Match>
