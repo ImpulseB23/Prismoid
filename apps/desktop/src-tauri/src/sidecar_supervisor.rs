@@ -35,9 +35,9 @@ use tauri_plugin_shell::{
 use crate::emote_index::{EmoteBundle, EmoteIndex};
 #[cfg(windows)]
 use crate::host::{
-    build_bootstrap_line, build_twitch_connect_line, mark_handle_inheritable, parse_batch,
-    parse_sidecar_event, unmark_handle_inheritable, SidecarEvent, TwitchCreds, SIDECAR_BINARY,
-    SIGNAL_WAIT_TIMEOUT,
+    build_bootstrap_line, build_token_refresh_line, build_twitch_connect_line,
+    mark_handle_inheritable, parse_batch, parse_sidecar_event, unmark_handle_inheritable,
+    SidecarEvent, TwitchCreds, SIDECAR_BINARY, SIGNAL_WAIT_TIMEOUT,
 };
 #[cfg(windows)]
 use crate::message::UnifiedMessage;
@@ -179,7 +179,7 @@ async fn supervise<R: Runtime>(
         };
 
         let started = Instant::now();
-        match run_once(&app, &cfg, attempt, Some(&creds), &sender).await {
+        match run_once(&app, &cfg, attempt, Some(&creds), &sender, &auth).await {
             Ok(()) => tracing::info!(attempt, "sidecar iteration ended"),
             Err(e) => tracing::error!(error = %e, attempt, "sidecar iteration failed"),
         }
@@ -258,6 +258,7 @@ async fn run_once<R: Runtime>(
     attempt: u32,
     creds: Option<&TwitchCreds>,
     sender: &SidecarCommandSender,
+    auth: &Arc<AuthManager>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let reader = RingBufReader::create_owner(DEFAULT_CAPACITY)?;
     let handle = reader.raw_handle();
@@ -342,6 +343,18 @@ async fn run_once<R: Runtime>(
 
     emit_status(app, "running", attempt, None);
 
+    // Proactive token refresh (ADR 29): periodically check if the Twitch
+    // token is near expiry and push a fresh one to the sidecar so EventSub
+    // reconnects don't fail with a stale credential. The task is cancelled
+    // when the event loop exits (sidecar death or heartbeat timeout).
+    let refresh_handle = {
+        let auth = Arc::clone(auth);
+        let sender = sender.clone();
+        tauri::async_runtime::spawn(async move {
+            token_refresh_loop(auth, sender).await;
+        })
+    };
+
     run_event_loop(
         &mut rx,
         cfg.heartbeat_timeout,
@@ -357,6 +370,8 @@ async fn run_once<R: Runtime>(
         || emit_status(app, "unhealthy", attempt, None),
     )
     .await;
+
+    refresh_handle.abort();
 
     // Release-store the shutdown flag; the drain loop does an Acquire-load
     // at the top of every iteration and exits after one final drain pass
@@ -445,6 +460,68 @@ async fn run_event_loop<F, K, U>(
                 on_timeout_kill();
                 killed = true;
             }
+        }
+    }
+}
+
+/// Check interval for proactive token refresh. Slightly shorter than the
+/// 5-minute refresh threshold so we always refresh before the sidecar's
+/// token actually expires.
+#[cfg(windows)]
+const TOKEN_CHECK_INTERVAL: Duration = Duration::from_secs(4 * 60);
+
+/// Periodically checks if the Twitch access token is near expiry and
+/// pushes a fresh one to the running sidecar. Designed to be spawned as
+/// a tokio task and aborted when the sidecar iteration ends.
+#[cfg(windows)]
+async fn token_refresh_loop(auth: Arc<AuthManager>, sender: SidecarCommandSender) {
+    token_refresh_loop_inner(auth, TOKEN_CHECK_INTERVAL, |line| sender.write_raw(line)).await;
+}
+
+/// Inner loop extracted so tests can inject a fake write callback and a
+/// shorter interval without needing a real `CommandChild`.
+#[cfg(windows)]
+async fn token_refresh_loop_inner<W>(auth: Arc<AuthManager>, period: Duration, mut write: W)
+where
+    W: FnMut(&[u8]) -> bool,
+{
+    let mut interval = tokio::time::interval(period);
+    // The first tick fires immediately; skip it since we just loaded
+    // a fresh token at sidecar spawn.
+    interval.tick().await;
+
+    let mut last_token = String::new();
+
+    loop {
+        interval.tick().await;
+
+        let tokens = match auth.load_or_refresh().await {
+            Ok(t) => t,
+            Err(e) => {
+                tracing::warn!(error = %e, "proactive token refresh failed");
+                continue;
+            }
+        };
+
+        if tokens.access_token == last_token {
+            tracing::debug!("token unchanged, skipping refresh send");
+            continue;
+        }
+
+        let line = match build_token_refresh_line(&tokens.access_token) {
+            Ok(l) => l,
+            Err(e) => {
+                tracing::error!(error = %e, "failed to serialize token_refresh command");
+                continue;
+            }
+        };
+
+        if write(&line) {
+            last_token = tokens.access_token;
+            tracing::info!("proactive token refresh sent to sidecar");
+        } else {
+            tracing::debug!("sidecar gone before token refresh could be sent");
+            break;
         }
     }
 }
@@ -996,5 +1073,156 @@ mod tests {
 
         assert_eq!(probe.kills(), 1);
         assert_eq!(probe.unhealthy(), 1);
+    }
+
+    // -- token_refresh_loop tests ----------------------------------------
+
+    use crate::twitch_auth::{AuthError, TokenStore, TwitchTokens};
+    use std::sync::Mutex as StdMutex;
+
+    fn far_future_tokens(access: &str) -> TwitchTokens {
+        TwitchTokens {
+            access_token: access.into(),
+            refresh_token: "rt".into(),
+            expires_at_ms: i64::MAX,
+            scopes: vec![],
+            user_id: "123".into(),
+            login: "test".into(),
+        }
+    }
+
+    /// Clone-able in-memory token store for tests that need to mutate
+    /// the stored tokens after the `AuthManager` has been constructed.
+    #[derive(Clone, Default)]
+    struct SharedStore(Arc<StdMutex<Option<TwitchTokens>>>);
+
+    impl crate::twitch_auth::TokenStore for SharedStore {
+        fn load(&self) -> Result<Option<TwitchTokens>, AuthError> {
+            Ok(self.0.lock().unwrap().clone())
+        }
+        fn save(&self, tokens: &TwitchTokens) -> Result<(), AuthError> {
+            *self.0.lock().unwrap() = Some(tokens.clone());
+            Ok(())
+        }
+        fn delete(&self) -> Result<(), AuthError> {
+            *self.0.lock().unwrap() = None;
+            Ok(())
+        }
+    }
+
+    fn make_auth(store: SharedStore) -> Arc<AuthManager> {
+        Arc::new(AuthManager::builder("test_client_id").build(store, reqwest::Client::new()))
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn token_refresh_loop_sends_on_new_token_then_breaks_on_write_fail() {
+        let store = SharedStore::default();
+        store.save(&far_future_tokens("tok_a")).unwrap();
+
+        let auth = make_auth(store);
+        let mut sent = Vec::new();
+
+        // write returns false -> loop breaks after the first send attempt
+        token_refresh_loop_inner(auth, Duration::from_millis(50), |line| {
+            sent.push(String::from_utf8_lossy(line).to_string());
+            false
+        })
+        .await;
+
+        assert_eq!(sent.len(), 1);
+        assert!(sent[0].contains("tok_a"));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn token_refresh_loop_skips_unchanged_token() {
+        let store = SharedStore::default();
+        store.save(&far_future_tokens("tok_same")).unwrap();
+
+        let auth = make_auth(store);
+        let call_count = Rc::new(Cell::new(0u32));
+        let cc = call_count.clone();
+
+        let loop_fut = token_refresh_loop_inner(auth, Duration::from_millis(50), move |_line| {
+            cc.set(cc.get() + 1);
+            true // write succeeds
+        });
+        tokio::pin!(loop_fut);
+
+        // Advance past 3 ticks: first tick is skipped, ticks 2-4 fire.
+        // Tick 2 sees a new token (vs empty last_token) -> sends.
+        // Ticks 3-4 see the same token -> skip.
+        tokio::select! {
+            _ = &mut loop_fut => panic!("loop should not exit"),
+            _ = tokio::time::sleep(Duration::from_millis(200)) => {}
+        }
+
+        assert_eq!(call_count.get(), 1, "only the first tick should send");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn token_refresh_loop_sends_again_after_token_rotates() {
+        let store = SharedStore::default();
+        store.save(&far_future_tokens("tok_old")).unwrap();
+
+        let auth = make_auth(store.clone());
+        let sent = Rc::new(std::cell::RefCell::new(Vec::<String>::new()));
+        let s = sent.clone();
+
+        let loop_fut = token_refresh_loop_inner(auth, Duration::from_millis(50), move |line| {
+            s.borrow_mut()
+                .push(String::from_utf8_lossy(line).to_string());
+            true
+        });
+        tokio::pin!(loop_fut);
+
+        // Let the first real tick fire and send tok_old.
+        tokio::select! {
+            _ = &mut loop_fut => panic!("loop should not exit"),
+            _ = tokio::time::sleep(Duration::from_millis(60)) => {}
+        }
+        assert_eq!(sent.borrow().len(), 1);
+
+        // Rotate the token in the store.
+        store.save(&far_future_tokens("tok_new")).unwrap();
+
+        // Advance past another tick.
+        tokio::select! {
+            _ = &mut loop_fut => panic!("loop should not exit"),
+            _ = tokio::time::sleep(Duration::from_millis(60)) => {}
+        }
+
+        let lines = sent.borrow();
+        assert_eq!(lines.len(), 2);
+        assert!(lines[0].contains("tok_old"));
+        assert!(lines[1].contains("tok_new"));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn token_refresh_loop_continues_on_load_error() {
+        let store = SharedStore::default();
+        let auth = make_auth(store.clone());
+        let call_count = Rc::new(Cell::new(0u32));
+        let cc = call_count.clone();
+
+        let loop_fut = token_refresh_loop_inner(auth, Duration::from_millis(50), move |_| {
+            cc.set(cc.get() + 1);
+            true
+        });
+        tokio::pin!(loop_fut);
+
+        // Let a few error ticks pass. write should never be called.
+        tokio::select! {
+            _ = &mut loop_fut => panic!("loop should not exit on errors"),
+            _ = tokio::time::sleep(Duration::from_millis(200)) => {}
+        }
+        assert_eq!(call_count.get(), 0);
+
+        // Now seed a token and let the next tick pick it up.
+        store.save(&far_future_tokens("recovered")).unwrap();
+        tokio::select! {
+            _ = &mut loop_fut => panic!("loop should not exit"),
+            _ = tokio::time::sleep(Duration::from_millis(60)) => {}
+        }
+        assert_eq!(call_count.get(), 1);
     }
 }

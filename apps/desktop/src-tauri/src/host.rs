@@ -227,6 +227,24 @@ pub fn build_send_chat_message_line(args: SendChatMessageArgs<'_>) -> serde_json
     Ok(bytes)
 }
 
+/// Serializes a `token_refresh` control command line for the sidecar.
+/// The sidecar updates the access token on all running Twitch clients
+/// so the next EventSub reconnect uses a fresh credential.
+pub fn build_token_refresh_line(access_token: &str) -> serde_json::Result<Vec<u8>> {
+    #[derive(Serialize)]
+    struct RefreshCmd<'a> {
+        cmd: &'a str,
+        token: &'a str,
+    }
+    let cmd = RefreshCmd {
+        cmd: "token_refresh",
+        token: access_token,
+    };
+    let mut bytes = serde_json::to_vec(&cmd)?;
+    bytes.push(b'\n');
+    Ok(bytes)
+}
+
 /// Marks a shared memory HANDLE inheritable just before spawning a child
 /// process. See ADR 18 for why this is necessary.
 #[cfg(windows)]
@@ -745,5 +763,15 @@ mod tests {
         assert_eq!(parsed["broadcaster_id"], "b");
         assert_eq!(parsed["message"], "hi");
         assert_eq!(parsed["token"], "tok");
+    }
+
+    #[test]
+    fn build_token_refresh_line_has_cmd_and_token() {
+        let line = build_token_refresh_line("fresh-tok").unwrap();
+        assert_eq!(line.last(), Some(&b'\n'));
+        let body = &line[..line.len() - 1];
+        let parsed: serde_json::Value = serde_json::from_slice(body).unwrap();
+        assert_eq!(parsed["cmd"], "token_refresh");
+        assert_eq!(parsed["token"], "fresh-tok");
     }
 }

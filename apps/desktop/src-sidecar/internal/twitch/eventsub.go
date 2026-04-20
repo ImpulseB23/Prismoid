@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sync"
 	"time"
 
 	"github.com/coder/websocket"
@@ -27,7 +28,6 @@ type Notify func(msgType string, payload any)
 type Client struct {
 	BroadcasterID string
 	UserID        string
-	AccessToken   string
 	ClientID      string
 	HelixBase     string // override for testing; "" uses default
 	WSURL         string // override for testing; "" uses default
@@ -35,6 +35,38 @@ type Client struct {
 	Out    chan<- []byte
 	Log    zerolog.Logger
 	Notify Notify
+
+	mu          sync.RWMutex
+	accessToken string
+}
+
+// NewClient constructs a Client with the given access token. The token
+// can be rotated mid-session via SetAccessToken.
+func NewClient(broadcasterID, userID, accessToken, clientID string, out chan<- []byte, log zerolog.Logger, notify Notify) *Client {
+	return &Client{
+		BroadcasterID: broadcasterID,
+		UserID:        userID,
+		ClientID:      clientID,
+		Out:           out,
+		Log:           log,
+		Notify:        notify,
+		accessToken:   accessToken,
+	}
+}
+
+// AccessToken returns the current token. Safe for concurrent use.
+func (c *Client) AccessToken() string {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.accessToken
+}
+
+// SetAccessToken rotates the token. The next EventSub reconnect or Helix
+// call will pick up the new value.
+func (c *Client) SetAccessToken(token string) {
+	c.mu.Lock()
+	c.accessToken = token
+	c.mu.Unlock()
 }
 
 // Run connects to EventSub and reads messages until ctx is cancelled.
@@ -93,7 +125,7 @@ func (c *Client) connectAndListen(ctx context.Context, url string) error {
 
 	c.Log.Info().Str("session", sessionID).Int("keepalive_s", keepalive).Msg("connected to eventsub")
 
-	if err := Subscribe(ctx, c.HelixBase, sessionID, c.BroadcasterID, c.UserID, c.AccessToken, c.ClientID); err != nil {
+	if err := Subscribe(ctx, c.HelixBase, sessionID, c.BroadcasterID, c.UserID, c.AccessToken(), c.ClientID); err != nil {
 		var authErr *AuthError
 		if errors.As(err, &authErr) {
 			if c.Notify != nil {

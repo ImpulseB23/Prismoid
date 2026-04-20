@@ -36,17 +36,10 @@ func keepaliveMsg() []byte {
 }
 
 func newTestClient(wsURL, helixURL string, out chan<- []byte) *Client {
-	return &Client{
-		BroadcasterID: "broadcaster-1",
-		UserID:        "user-1",
-		AccessToken:   "test-token",
-		ClientID:      "test-client",
-		HelixBase:     helixURL,
-		WSURL:         wsURL,
-		Out:           out,
-		Log:           zerolog.Nop(),
-		Notify:        func(string, any) {},
-	}
+	c := NewClient("broadcaster-1", "user-1", "test-token", "test-client", out, zerolog.Nop(), func(string, any) {})
+	c.HelixBase = helixURL
+	c.WSURL = wsURL
+	return c
 }
 
 // drainChan reads everything currently in ch (non-blocking after a brief
@@ -391,6 +384,26 @@ func TestClient_wsURLOverride(t *testing.T) {
 	c := &Client{WSURL: "wss://override.example/ws"}
 	if got := c.wsURL(); got != "wss://override.example/ws" {
 		t.Errorf("expected override, got %q", got)
+	}
+}
+
+func TestClient_AccessTokenConcurrent(t *testing.T) {
+	c := NewClient("b", "u", "initial", "cid", nil, zerolog.Nop(), nil)
+
+	done := make(chan struct{})
+	go func() {
+		for i := 0; i < 1000; i++ {
+			c.SetAccessToken("rotated")
+		}
+		close(done)
+	}()
+	for i := 0; i < 1000; i++ {
+		_ = c.AccessToken()
+	}
+	<-done
+
+	if got := c.AccessToken(); got != "rotated" {
+		t.Errorf("expected rotated, got %q", got)
 	}
 }
 

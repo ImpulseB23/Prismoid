@@ -211,6 +211,7 @@ func RunCommandLoop(ctx context.Context, scanner *bufio.Scanner, encoder *json.E
 	defer heartbeat.Stop()
 
 	clients := make(map[string]context.CancelFunc)
+	twitchClients := make(map[string]*twitch.Client)
 	var encoderMu sync.Mutex
 	notify := makeNotify(encoder, &encoderMu, logger)
 
@@ -238,7 +239,7 @@ func RunCommandLoop(ctx context.Context, scanner *bufio.Scanner, encoder *json.E
 				return err
 			}
 		case cmd := <-cmdCh:
-			DispatchCommand(ctx, cmd, clients, out, notify, logger)
+			DispatchCommand(ctx, cmd, clients, twitchClients, out, notify, logger)
 		}
 	}
 }
@@ -266,12 +267,14 @@ func makeNotify(encoder *json.Encoder, encoderMu *sync.Mutex, logger zerolog.Log
 }
 
 // DispatchCommand routes a control.Command to its handler.
-func DispatchCommand(ctx context.Context, cmd control.Command, clients map[string]context.CancelFunc, out chan<- []byte, notify twitch.Notify, logger zerolog.Logger) {
+func DispatchCommand(ctx context.Context, cmd control.Command, clients map[string]context.CancelFunc, twitchClients map[string]*twitch.Client, out chan<- []byte, notify twitch.Notify, logger zerolog.Logger) {
 	switch cmd.Cmd {
 	case "twitch_connect":
-		HandleTwitchConnect(ctx, cmd, clients, out, notify, logger)
+		HandleTwitchConnect(ctx, cmd, clients, twitchClients, out, notify, logger)
 	case "twitch_disconnect":
-		HandleTwitchDisconnect(cmd, clients, logger)
+		HandleTwitchDisconnect(cmd, clients, twitchClients, logger)
+	case "token_refresh":
+		HandleTokenRefresh(cmd, twitchClients, logger)
 	case "youtube_connect":
 		HandleYouTubeConnect(ctx, cmd, clients, out, notify, logger)
 	case "youtube_disconnect":
@@ -475,7 +478,7 @@ func HandleSendChatMessage(ctx context.Context, cmd control.Command, notify twit
 // Fetches share the client's cancel context, so twitch_disconnect also
 // cancels an in-flight bundle fetch. Failures per provider are captured in
 // [emotes.Bundle.Errors] rather than blocking the chat connection.
-func HandleTwitchConnect(ctx context.Context, cmd control.Command, clients map[string]context.CancelFunc, out chan<- []byte, notify twitch.Notify, logger zerolog.Logger) {
+func HandleTwitchConnect(ctx context.Context, cmd control.Command, clients map[string]context.CancelFunc, twitchClients map[string]*twitch.Client, out chan<- []byte, notify twitch.Notify, logger zerolog.Logger) {
 	if _, exists := clients[cmd.BroadcasterID]; exists {
 		logger.Warn().Str("broadcaster", cmd.BroadcasterID).Msg("already connected, ignoring")
 		return
@@ -483,17 +486,18 @@ func HandleTwitchConnect(ctx context.Context, cmd control.Command, clients map[s
 
 	clientCtx, clientCancel := context.WithCancel(ctx)
 
-	client := &twitch.Client{
-		BroadcasterID: cmd.BroadcasterID,
-		UserID:        cmd.UserID,
-		AccessToken:   cmd.Token,
-		ClientID:      cmd.ClientID,
-		Out:           out,
-		Log:           logger.With().Str("broadcaster", cmd.BroadcasterID).Logger(),
-		Notify:        notify,
-	}
+	client := twitch.NewClient(
+		cmd.BroadcasterID,
+		cmd.UserID,
+		cmd.Token,
+		cmd.ClientID,
+		out,
+		logger.With().Str("broadcaster", cmd.BroadcasterID).Logger(),
+		notify,
+	)
 
 	clients[cmd.BroadcasterID] = clientCancel
+	twitchClients[cmd.BroadcasterID] = client
 
 	go func() {
 		// errors.Is handles both parent shutdown and per-client disconnect:
@@ -579,7 +583,7 @@ func buildFetcher(cmd control.Command) *emotes.Fetcher {
 }
 
 // HandleTwitchDisconnect cancels and removes a previously-connected client.
-func HandleTwitchDisconnect(cmd control.Command, clients map[string]context.CancelFunc, logger zerolog.Logger) {
+func HandleTwitchDisconnect(cmd control.Command, clients map[string]context.CancelFunc, twitchClients map[string]*twitch.Client, logger zerolog.Logger) {
 	cancelFn, exists := clients[cmd.BroadcasterID]
 	if !exists {
 		logger.Warn().Str("broadcaster", cmd.BroadcasterID).Msg("no active connection to disconnect")
@@ -587,7 +591,25 @@ func HandleTwitchDisconnect(cmd control.Command, clients map[string]context.Canc
 	}
 	cancelFn()
 	delete(clients, cmd.BroadcasterID)
+	delete(twitchClients, cmd.BroadcasterID)
 	logger.Info().Str("broadcaster", cmd.BroadcasterID).Msg("twitch client disconnected")
+}
+
+// HandleTokenRefresh updates the access token on all running Twitch clients.
+// The Rust supervisor sends this when it proactively refreshes the token
+// before expiry, so EventSub reconnects pick up the new credential.
+func HandleTokenRefresh(cmd control.Command, twitchClients map[string]*twitch.Client, logger zerolog.Logger) {
+	if cmd.Token == "" {
+		logger.Warn().Msg("token_refresh missing token; ignoring")
+		return
+	}
+	n := 0
+	for id, c := range twitchClients {
+		c.SetAccessToken(cmd.Token)
+		logger.Debug().Str("broadcaster", id).Msg("token rotated")
+		n++
+	}
+	logger.Info().Int("clients", n).Msg("token refresh applied")
 }
 
 // HandleYouTubeConnect spawns a YouTube gRPC streamList client for the given
