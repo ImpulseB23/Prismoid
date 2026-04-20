@@ -65,3 +65,9 @@ __bench = []
 name = "drain_throughput"
 harness = false
 required-features = ["__bench"]
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true
+opt-level = "s"

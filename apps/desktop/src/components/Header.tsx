@@ -3,7 +3,7 @@
 // `sidecar_status` event. Purely presentational: no commands invoked, so
 // a broken supervisor can't brick the UI.
 
-import { Component, Show, createSignal, onCleanup, onMount } from "solid-js";
+import { Component, createSignal, onCleanup, onMount } from "solid-js";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import {
   indicatorFor,
@@ -73,53 +73,48 @@ const Header: Component<HeaderProps> = (props) => {
           height: "20px",
           "border-radius": "4px",
           background: "#9146ff",
-          color: "#fff",
-          "font-weight": 700,
-          "font-size": "12px",
         }}
       >
-        T
+        <svg
+          width="12"
+          height="12"
+          viewBox="0 0 24 24"
+          xmlns="http://www.w3.org/2000/svg"
+        >
+          <path
+            d="M11.571 4.714h1.715v5.143H11.57zm4.715 0H18v5.143h-1.714zM6 0L1.714 4.286v15.428h5.143V24l4.286-4.286h3.428L22.286 12V0zm14.571 11.143l-3.428 3.428h-3.429l-3 3v-3H6.857V1.714h13.714Z"
+            fill="#fff"
+          />
+        </svg>
       </span>
       <span style={{ "font-weight": 600 }}>{props.login}</span>
       <span style={{ flex: 1 }} />
-      <ConnectionChip state={state()} />
+      <StatusDot state={state()} />
     </header>
   );
 };
 
-const ConnectionChip: Component<{ state: SidecarState | null }> = (props) => {
+const StatusDot: Component<{ state: SidecarState | null }> = (props) => {
   const info = () => indicatorFor(props.state);
+  const tooltip = () => {
+    const i = info();
+    if (props.state === "running") return "Twitch: connected";
+    return i.label;
+  };
   return (
     <span
-      data-testid="connection-chip"
+      data-testid="connection-dot"
       data-state={props.state ?? "initial"}
-      style={{
-        display: "inline-flex",
-        "align-items": "center",
-        gap: "6px",
-        padding: "2px 8px",
-        "border-radius": "10px",
-        background: "#1f1f23",
-        border: "1px solid #2a2a2e",
-        "font-size": "12px",
-        color: "#c8c8d0",
-      }}
-    >
-      <Dot color={info().color} />
-      <Show when={info().label}>{info().label}</Show>
-    </span>
-  );
-};
-
-const Dot: Component<{ color: string }> = (props) => {
-  return (
-    <span
+      role="status"
+      aria-label={tooltip()}
+      title={tooltip()}
       style={{
         display: "inline-block",
         width: "8px",
         height: "8px",
         "border-radius": "50%",
-        background: props.color,
+        background: info().color,
+        cursor: "default",
       }}
     />
   );
