@@ -27,7 +27,7 @@ reqwest = { version = "0.13", default-features = false, features = [
 twitch_oauth2 = { version = "0.17", default-features = false, features = ["reqwest"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-thiserror = "1"
+thiserror = "2"
 tokio = { version = "1", features = ["macros", "time"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
@@ -36,12 +36,12 @@ arc-swap = "1.7"
 rustc-hash = "2.1"
 
 [dev-dependencies]
-criterion = "0.5"
-httpmock = "0.7"
+criterion = "0.8"
+httpmock = "0.8"
 tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread", "time", "test-util"] }
 
 [target.'cfg(windows)'.dependencies]
-windows = { version = "0.61", features = [
+windows = { version = "0.62", features = [
     "Win32_Foundation",
     "Win32_System_Memory",
     "Win32_Security",
