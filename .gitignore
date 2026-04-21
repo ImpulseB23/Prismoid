@@ -20,6 +20,10 @@
 .env
 .env.*
 
+# Secrets — never commit OAuth client secret JSON downloads
+client_secret_*.json
+*.client_secret.json
+
 # OS
 .DS_Store
 Thumbs.db
