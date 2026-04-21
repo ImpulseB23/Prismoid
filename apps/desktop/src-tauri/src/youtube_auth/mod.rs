@@ -37,20 +37,24 @@ pub use tokens::YouTubeTokens;
 
 /// OAuth `client_id` for the registered Prismoid Google application.
 ///
-/// Replace with the real value from your Google Cloud Console "OAuth
-/// 2.0 Client IDs → Desktop app" credential before shipping. The
-/// surrounding code paths (start_login → complete_login → exchange)
-/// will all return `AuthError::OAuth("invalid_client")` until this is
-/// set to a registered Desktop client.
+/// Sourced from the `GOOGLE_CLIENT_ID` env var at compile time so the
+/// real Desktop client credential never lands in the public repo.
+/// Falls back to a placeholder when the env var is unset, in which
+/// case the surrounding code paths (start_login → complete_login →
+/// exchange) all return `AuthError::OAuth("invalid_client")`.
 ///
 /// Per RFC 8252 §8.4 and Google's own docs, this `client_id` is a
 /// public identifier — it appears in browser URLs during the
 /// authorization flow and is bundled in source the same way the
 /// Twitch DCF flow handles `TWITCH_CLIENT_ID` (see ADR 37).
-pub const GOOGLE_CLIENT_ID: &str = "REPLACE_ME.apps.googleusercontent.com";
+pub const GOOGLE_CLIENT_ID: &str = match option_env!("GOOGLE_CLIENT_ID") {
+    Some(v) => v,
+    None => "REPLACE_ME.apps.googleusercontent.com",
+};
 
 /// OAuth `client_secret` for the registered Prismoid Google application.
 ///
+/// Sourced from the `GOOGLE_CLIENT_SECRET` env var at compile time.
 /// Google issues a `client_secret` for "Desktop app" credentials and
 /// requires it on the token-exchange POST, but their own
 /// [installed-app docs](https://developers.google.com/identity/protocols/oauth2/native-app)
@@ -58,7 +62,10 @@ pub const GOOGLE_CLIENT_ID: &str = "REPLACE_ME.apps.googleusercontent.com";
 /// as a secret."* PKCE S256 is what cryptographically protects the
 /// flow on a public client; this string is included on the wire only
 /// because Google's endpoint won't accept the request without it.
-pub const GOOGLE_CLIENT_SECRET: &str = "REPLACE_ME";
+pub const GOOGLE_CLIENT_SECRET: &str = match option_env!("GOOGLE_CLIENT_SECRET") {
+    Some(v) => v,
+    None => "REPLACE_ME",
+};
 
 /// Google OAuth 2.0 authorization endpoint. Hard-coded to the v2
 /// endpoint per Google's [installed-app guide](https://developers.google.com/identity/protocols/oauth2/native-app#step-2-send-a-request-to-googles-oauth-20-server).
