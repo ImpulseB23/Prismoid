@@ -3451,15 +3451,18 @@ version = "0.0.1"
 dependencies = [
  "aho-corasick",
  "arc-swap",
+ "base64 0.22.1",
  "chrono",
  "criterion",
  "dotenvy",
  "httpmock",
  "keyring",
+ "rand 0.9.3",
  "reqwest",
  "rustc-hash",
  "serde",
  "serde_json",
+ "sha2",
  "tauri",
  "tauri-build",
  "tauri-plugin-opener",
@@ -3469,6 +3472,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "twitch_oauth2",
+ "url",
  "windows 0.62.2",
 ]
 

@@ -1,0 +1,80 @@
+//! YouTube OAuth + keychain integration.
+//!
+//! Implements ADR 39 (YouTube OAuth 2.0 via Authorization Code + PKCE
+//! with loopback IP redirect, tokens via `keyring-rs`), ADR 29
+//! (proactive refresh 5 min before expiry), and ADR 31 (re-auth path
+//! on refresh failure). The flow:
+//!
+//! 1. At startup the supervisor calls [`AuthManager::load_or_refresh`].
+//!    If fresh, the access token is handed to the sidecar via
+//!    `youtube_connect`. If stale, the manager refreshes transparently
+//!    and persists the rotated refresh token.
+//! 2. On [`AuthError::NoTokens`] (first run) or
+//!    [`AuthError::RefreshTokenInvalid`] (Google's refresh tokens
+//!    silently expire after 6 months of inactivity, plus other invalid
+//!    states), the frontend kicks [`AuthManager::start_login`] →
+//!    [`AuthManager::complete_login`].
+//!
+//! The module is pure-logic and async-only; wiring into the supervisor
+//! lives alongside the Twitch supervisor in `lib.rs::setup`.
+
+pub mod auth_state;
+pub mod commands;
+pub mod errors;
+pub mod manager;
+pub mod storage;
+pub mod tokens;
+
+pub use auth_state::{AuthCommandError, AuthState, AuthStatus, AuthStatusState, PkceFlowView};
+pub use commands::{
+    youtube_auth_status, youtube_cancel_login, youtube_complete_login, youtube_logout,
+    youtube_start_login,
+};
+pub use errors::AuthError;
+pub use manager::{AuthManager, AuthManagerBuilder, PendingLogin, REFRESH_THRESHOLD_MS};
+pub use storage::{KeychainStore, MemoryStore, TokenStore, KEYCHAIN_ACCOUNT, KEYCHAIN_SERVICE};
+pub use tokens::YouTubeTokens;
+
+/// OAuth `client_id` for the registered Prismoid Google application.
+///
+/// Replace with the real value from your Google Cloud Console "OAuth
+/// 2.0 Client IDs → Desktop app" credential before shipping. The
+/// surrounding code paths (start_login → complete_login → exchange)
+/// will all return `AuthError::OAuth("invalid_client")` until this is
+/// set to a registered Desktop client.
+///
+/// Per RFC 8252 §8.4 and Google's own docs, this `client_id` is a
+/// public identifier — it appears in browser URLs during the
+/// authorization flow and is bundled in source the same way the
+/// Twitch DCF flow handles `TWITCH_CLIENT_ID` (see ADR 37).
+pub const GOOGLE_CLIENT_ID: &str = "REPLACE_ME.apps.googleusercontent.com";
+
+/// OAuth `client_secret` for the registered Prismoid Google application.
+///
+/// Google issues a `client_secret` for "Desktop app" credentials and
+/// requires it on the token-exchange POST, but their own
+/// [installed-app docs](https://developers.google.com/identity/protocols/oauth2/native-app)
+/// note: *"In this context, the client secret is obviously not treated
+/// as a secret."* PKCE S256 is what cryptographically protects the
+/// flow on a public client; this string is included on the wire only
+/// because Google's endpoint won't accept the request without it.
+pub const GOOGLE_CLIENT_SECRET: &str = "REPLACE_ME";
+
+/// Google OAuth 2.0 authorization endpoint. Hard-coded to the v2
+/// endpoint per Google's [installed-app guide](https://developers.google.com/identity/protocols/oauth2/native-app#step-2-send-a-request-to-googles-oauth-20-server).
+pub const GOOGLE_AUTH_ENDPOINT: &str = "https://accounts.google.com/o/oauth2/v2/auth";
+
+/// Google OAuth 2.0 token endpoint. Hard-coded to the v4 endpoint per
+/// the same guide.
+pub const GOOGLE_TOKEN_ENDPOINT: &str = "https://oauth2.googleapis.com/token";
+
+/// YouTube Data API v3 channels endpoint, used post-token-exchange to
+/// fetch the authenticated user's channel id + title.
+pub const YOUTUBE_CHANNELS_ENDPOINT: &str = "https://www.googleapis.com/youtube/v3/channels";
+
+/// Read-only YouTube Data API scope. Required to read live chat.
+pub const SCOPE_YOUTUBE_READONLY: &str = "https://www.googleapis.com/auth/youtube.readonly";
+
+/// Full YouTube scope (read + write + moderation). Required to send
+/// messages and ban/timeout/delete on YouTube live chat.
+pub const SCOPE_YOUTUBE: &str = "https://www.googleapis.com/auth/youtube";

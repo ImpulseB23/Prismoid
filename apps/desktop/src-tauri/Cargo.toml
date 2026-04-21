@@ -28,12 +28,16 @@ twitch_oauth2 = { version = "0.17", default-features = false, features = ["reqwe
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
-tokio = { version = "1", features = ["macros", "time"] }
+tokio = { version = "1", features = ["macros", "time", "net", "io-util", "sync"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 aho-corasick = "1.1"
 arc-swap = "1.7"
 rustc-hash = "2.1"
+sha2 = "0.10"
+base64 = "0.22"
+rand = "0.9"
+url = "2"
 
 [dev-dependencies]
 criterion = "0.8"

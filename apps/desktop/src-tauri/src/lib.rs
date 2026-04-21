@@ -1,9 +1,11 @@
 mod host;
 mod message;
+pub mod oauth_pkce;
 pub mod ringbuf;
 mod sidecar_commands;
 mod sidecar_supervisor;
 pub mod twitch_auth;
+pub mod youtube_auth;
 
 pub mod emote_index;
 
@@ -53,6 +55,11 @@ pub fn run() {
             twitch_auth::commands::twitch_complete_login,
             twitch_auth::commands::twitch_cancel_login,
             twitch_auth::commands::twitch_logout,
+            youtube_auth::commands::youtube_auth_status,
+            youtube_auth::commands::youtube_start_login,
+            youtube_auth::commands::youtube_complete_login,
+            youtube_auth::commands::youtube_cancel_login,
+            youtube_auth::commands::youtube_logout,
             sidecar_commands::twitch_send_message,
         ])
         .setup(setup)
@@ -94,6 +101,31 @@ fn setup<R: Runtime>(app: &mut tauri::App<R>) -> Result<(), Box<dyn std::error::
     );
     let wakeup = Arc::new(Notify::new());
     app.manage(AuthState::new(auth.clone(), wakeup.clone()));
+
+    // YouTube auth manager + state. Sidecar wiring lands separately —
+    // this PR only stands up the OAuth + keychain stack and the
+    // frontend sign-in surface; the supervisor still only knows
+    // about Twitch tokens. ADR 39.
+    {
+        use youtube_auth::{
+            AuthManager as YtAuthManager, AuthState as YtAuthState,
+            KeychainStore as YtKeychainStore, GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET,
+            SCOPE_YOUTUBE, SCOPE_YOUTUBE_READONLY,
+        };
+        let yt_http_client = reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .expect("reqwest client (YouTube)");
+        let yt_auth = Arc::new(
+            YtAuthManager::builder(GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET)
+                .scope(SCOPE_YOUTUBE_READONLY)
+                .scope(SCOPE_YOUTUBE)
+                .build(YtKeychainStore, yt_http_client),
+        );
+        let yt_wakeup = Arc::new(Notify::new());
+        app.manage(YtAuthState::new(yt_auth, yt_wakeup));
+    }
+
     let sender = sidecar_commands::SidecarCommandSender::default();
     app.manage(sender.clone());
 

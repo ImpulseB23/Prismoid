@@ -10,6 +10,7 @@ import {
   type SidecarState,
   type SidecarStatus,
 } from "../lib/sidecarStatus";
+import YouTubeSignIn from "./YouTubeSignIn";
 
 export interface HeaderProps {
   login: string;
@@ -89,6 +90,7 @@ const Header: Component<HeaderProps> = (props) => {
       </span>
       <span style={{ "font-weight": 600 }}>{props.login}</span>
       <span style={{ flex: 1 }} />
+      <YouTubeSignIn />
       <StatusDot state={state()} />
     </header>
   );
