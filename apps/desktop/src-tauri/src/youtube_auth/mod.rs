@@ -97,3 +97,26 @@ pub const SCOPE_YOUTUBE_READONLY: &str = "https://www.googleapis.com/auth/youtub
 /// Full YouTube scope (read + write + moderation). Required to send
 /// messages and ban/timeout/delete on YouTube live chat.
 pub const SCOPE_YOUTUBE: &str = "https://www.googleapis.com/auth/youtube";
+
+#[cfg(test)]
+mod tests {
+    use super::or_placeholder;
+
+    #[test]
+    fn or_placeholder_uses_env_when_non_empty() {
+        assert_eq!(or_placeholder(Some("value"), "fallback"), "value");
+    }
+
+    #[test]
+    fn or_placeholder_falls_back_when_unset() {
+        assert_eq!(or_placeholder(None, "fallback"), "fallback");
+    }
+
+    #[test]
+    fn or_placeholder_falls_back_when_empty() {
+        // GitHub Actions expands a missing `${{ secrets.X }}` to `""`
+        // and option_env! surfaces that as Some(""). The helper must
+        // treat it as unset so release builds don't embed empty creds.
+        assert_eq!(or_placeholder(Some(""), "fallback"), "fallback");
+    }
+}
