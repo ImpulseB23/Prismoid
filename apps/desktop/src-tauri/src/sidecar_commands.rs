@@ -25,8 +25,12 @@ use tokio::sync::oneshot;
 #[cfg(windows)]
 use tauri_plugin_shell::process::CommandChild;
 
-use crate::host::{build_send_chat_message_line, SendChatMessageArgs, SendChatResult};
+use crate::host::{
+    build_send_chat_message_line, build_youtube_send_message_line, SendChatMessageArgs,
+    SendChatResult, YouTubeSendMessageArgs,
+};
 use crate::twitch_auth::{AuthError, AuthState, TWITCH_CLIENT_ID};
+use crate::youtube_auth::{AuthError as YouTubeAuthError, AuthState as YouTubeAuthState};
 
 /// Pure registry of in-flight `send_chat_message` requests. Carved out
 /// of [`Inner`] so the id-allocation, completion-routing, and clear
@@ -235,6 +239,14 @@ pub enum SendCommandError {
     MessageTooLong {
         max_bytes: usize,
     },
+    /// Variant carried by [`youtube_send_message`] when the user's
+    /// text exceeds the YouTube character limit. Distinct from
+    /// [`SendCommandError::MessageTooLong`] because YouTube enforces a
+    /// Unicode-character cap, not a byte cap, and the frontend renders
+    /// a different message for each.
+    MessageTooLongChars {
+        max_chars: usize,
+    },
     SidecarNotRunning,
     Io {
         message: String,
@@ -252,6 +264,14 @@ pub enum SendCommandError {
         code: String,
         message: String,
     },
+    /// YouTube Data API rejected the send. `code` is one of the stable
+    /// tags emitted by the sidecar (`unauthorized`, `quota_exceeded`,
+    /// `youtube_api`, `youtube_send_failed`) so the UI can render a
+    /// tailored message without parsing free-form text.
+    YouTube {
+        code: String,
+        message: String,
+    },
 }
 
 impl SendCommandError {
@@ -266,30 +286,58 @@ impl SendCommandError {
         }
     }
 
+    /// YouTube counterpart of [`SendCommandError::auth`]. The two
+    /// providers' `AuthError` enums share the same `NoTokens` /
+    /// `RefreshTokenInvalid` variants but are otherwise distinct types,
+    /// so a parallel mapper keeps the conversion table local to this
+    /// module instead of leaking a `From` impl into the auth crates.
+    fn youtube_auth(err: YouTubeAuthError) -> Self {
+        match err {
+            YouTubeAuthError::NoTokens | YouTubeAuthError::RefreshTokenInvalid => {
+                Self::NotLoggedIn {
+                    message: err.to_string(),
+                }
+            }
+            other => Self::Auth {
+                message: other.to_string(),
+            },
+        }
+    }
+
     fn from_send_result(r: SendChatResult) -> Result<SendChatOk, Self> {
+        Self::from_send_result_with(r, |code, message| Self::Helix { code, message })
+    }
+
+    /// YouTube counterpart of [`from_send_result`]. Same envelope, but
+    /// failures land in [`SendCommandError::YouTube`] so the frontend
+    /// can format a YouTube-specific message instead of a Twitch one.
+    fn from_youtube_send_result(r: SendChatResult) -> Result<SendChatOk, Self> {
+        Self::from_send_result_with(r, |code, message| Self::YouTube { code, message })
+    }
+
+    fn from_send_result_with(
+        r: SendChatResult,
+        rejected: impl FnOnce(String, String) -> Self,
+    ) -> Result<SendChatOk, Self> {
         if r.ok {
             return Ok(SendChatOk {
                 message_id: r.message_id,
             });
         }
         if !r.drop_code.is_empty() || !r.drop_message.is_empty() {
-            return Err(Self::Helix {
-                code: r.drop_code,
-                message: if r.drop_message.is_empty() {
-                    "message rejected".to_string()
-                } else {
-                    r.drop_message
-                },
-            });
-        }
-        Err(Self::Helix {
-            code: String::new(),
-            message: if r.error_message.is_empty() {
-                "send failed".to_string()
+            let message = if r.drop_message.is_empty() {
+                "message rejected".to_string()
             } else {
-                r.error_message
-            },
-        })
+                r.drop_message
+            };
+            return Err(rejected(r.drop_code, message));
+        }
+        let message = if r.error_message.is_empty() {
+            "send failed".to_string()
+        } else {
+            r.error_message
+        };
+        Err(rejected(String::new(), message))
     }
 }
 
@@ -307,6 +355,11 @@ pub struct SendChatOk {
 /// payloads before they cross the IPC boundary.
 pub const MAX_CHAT_MESSAGE_BYTES: usize = 500;
 
+/// Maximum chat message length accepted by the YouTube Data API
+/// `liveChatMessages.insert` endpoint. Documented as 200 Unicode
+/// characters; we count `chars()` to match the API's enforcement.
+pub const MAX_YOUTUBE_MESSAGE_CHARS: usize = 200;
+
 /// Trims `text` and rejects empty or oversize messages with the
 /// matching frontend error variant. Extracted from the Tauri command
 /// body so the validation rules are unit-testable without a runtime.
@@ -318,6 +371,22 @@ fn validate_message(text: &str) -> Result<&str, SendCommandError> {
     if trimmed.len() > MAX_CHAT_MESSAGE_BYTES {
         return Err(SendCommandError::MessageTooLong {
             max_bytes: MAX_CHAT_MESSAGE_BYTES,
+        });
+    }
+    Ok(trimmed)
+}
+
+/// YouTube counterpart of [`validate_message`]. The Data API enforces a
+/// 200-Unicode-character cap (not bytes), so the comparison runs on
+/// `chars().count()` rather than `len()`.
+fn validate_youtube_message(text: &str) -> Result<&str, SendCommandError> {
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return Err(SendCommandError::EmptyMessage);
+    }
+    if trimmed.chars().count() > MAX_YOUTUBE_MESSAGE_CHARS {
+        return Err(SendCommandError::MessageTooLongChars {
+            max_chars: MAX_YOUTUBE_MESSAGE_CHARS,
         });
     }
     Ok(trimmed)
@@ -365,6 +434,41 @@ pub async fn twitch_send_message(
     SendCommandError::from_send_result(result)
 }
 
+/// Sends a chat message to the active YouTube live broadcast. Mirrors
+/// `twitch_send_message` shape so the frontend's optimistic-render path
+/// stays platform-symmetric: same `SendChatOk { message_id }` success,
+/// same [`SendCommandError`] variants on failure (with the YouTube-only
+/// [`SendCommandError::MessageTooLongChars`] when the user runs over
+/// the Data API's 200-character cap).
+#[tauri::command]
+pub async fn youtube_send_message(
+    auth: State<'_, YouTubeAuthState>,
+    sender: State<'_, SidecarCommandSender>,
+    live_chat_id: String,
+    text: String,
+) -> Result<SendChatOk, SendCommandError> {
+    let trimmed = validate_youtube_message(&text)?;
+
+    let tokens = auth
+        .manager
+        .load_or_refresh()
+        .await
+        .map_err(SendCommandError::youtube_auth)?;
+
+    let (tx, rx) = oneshot::channel();
+    sender.send_with_pending(tx, |request_id| {
+        build_youtube_send_message_line(YouTubeSendMessageArgs {
+            access_token: &tokens.access_token,
+            live_chat_id: &live_chat_id,
+            message: trimmed,
+            request_id,
+        })
+    })?;
+
+    let result = rx.await.map_err(|_| SendCommandError::SidecarNotRunning)?;
+    SendCommandError::from_youtube_send_result(result)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -385,6 +489,56 @@ mod tests {
     fn auth_mapping_other_is_auth() {
         let mapped = SendCommandError::auth(AuthError::OAuth("boom".into()));
         assert!(matches!(mapped, SendCommandError::Auth { .. }));
+    }
+
+    #[test]
+    fn youtube_auth_mapping_no_tokens_is_not_logged_in() {
+        let mapped = SendCommandError::youtube_auth(YouTubeAuthError::NoTokens);
+        assert!(matches!(mapped, SendCommandError::NotLoggedIn { .. }));
+    }
+
+    #[test]
+    fn youtube_auth_mapping_refresh_invalid_is_not_logged_in() {
+        let mapped = SendCommandError::youtube_auth(YouTubeAuthError::RefreshTokenInvalid);
+        assert!(matches!(mapped, SendCommandError::NotLoggedIn { .. }));
+    }
+
+    #[test]
+    fn youtube_auth_mapping_other_is_auth() {
+        let mapped = SendCommandError::youtube_auth(YouTubeAuthError::OAuth("boom".into()));
+        assert!(matches!(mapped, SendCommandError::Auth { .. }));
+    }
+
+    #[test]
+    fn validate_youtube_message_rejects_empty() {
+        assert!(matches!(
+            validate_youtube_message("   "),
+            Err(SendCommandError::EmptyMessage)
+        ));
+    }
+
+    #[test]
+    fn validate_youtube_message_rejects_over_200_chars() {
+        let too_long = "a".repeat(201);
+        match validate_youtube_message(&too_long) {
+            Err(SendCommandError::MessageTooLongChars { max_chars }) => {
+                assert_eq!(max_chars, MAX_YOUTUBE_MESSAGE_CHARS);
+            }
+            other => panic!("expected MessageTooLongChars, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn validate_youtube_message_counts_chars_not_bytes() {
+        // 200 emoji ≈ 800 bytes — bytes-based limit would reject this,
+        // chars-based limit (matching Google's enforcement) accepts it.
+        let s = "🎉".repeat(200);
+        assert_eq!(validate_youtube_message(&s).unwrap(), s.as_str());
+    }
+
+    #[test]
+    fn validate_youtube_message_trims_surrounding_whitespace() {
+        assert_eq!(validate_youtube_message("  hi  ").unwrap(), "hi");
     }
 
     fn make_result(ok: bool, drop_code: &str, drop_message: &str, error: &str) -> SendChatResult {
@@ -431,6 +585,44 @@ mod tests {
                 assert_eq!(message, "401");
             }
             other => panic!("expected Helix, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn from_youtube_send_result_ok_returns_message_id() {
+        let ok = SendCommandError::from_youtube_send_result(make_result(true, "", "", ""))
+            .expect("ok result must succeed");
+        assert_eq!(ok.message_id, "abc");
+    }
+
+    #[test]
+    fn from_youtube_send_result_drop_maps_to_youtube_variant() {
+        match SendCommandError::from_youtube_send_result(make_result(
+            false,
+            "unauthorized",
+            "needs reauth",
+            "",
+        ))
+        .unwrap_err()
+        {
+            SendCommandError::YouTube { code, message } => {
+                assert_eq!(code, "unauthorized");
+                assert_eq!(message, "needs reauth");
+            }
+            other => panic!("expected YouTube, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn from_youtube_send_result_error_only_maps_to_youtube_variant() {
+        match SendCommandError::from_youtube_send_result(make_result(false, "", "", "transport"))
+            .unwrap_err()
+        {
+            SendCommandError::YouTube { code, message } => {
+                assert!(code.is_empty());
+                assert_eq!(message, "transport");
+            }
+            other => panic!("expected YouTube, got {other:?}"),
         }
     }
 

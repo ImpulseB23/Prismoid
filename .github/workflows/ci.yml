@@ -105,7 +105,9 @@ jobs:
           flags: rust
 
       - name: Audit
-        run: cargo audit
+        # RUSTSEC-2026-0097: unsound `rand::rng()` only triggers with a custom
+        # logger we don't install; pulled in transitively via tauri/keyring.
+        run: cargo audit --ignore RUSTSEC-2026-0097
 
   go:
     name: Go

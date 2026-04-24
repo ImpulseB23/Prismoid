@@ -9,6 +9,8 @@
 import { invoke } from "@tauri-apps/api/core";
 import { openUrl } from "@tauri-apps/plugin-opener";
 
+import type { SendMessageOk } from "./twitchAuth";
+
 export type AuthStatusState = "logged_out" | "logged_in";
 
 export type AuthStatus =
@@ -54,6 +56,19 @@ export function cancelLogin(): Promise<void> {
 
 export function logout(): Promise<void> {
   return invoke("youtube_logout");
+}
+
+// Maximum chat message length accepted by the YouTube Data API
+// liveChatMessages.insert endpoint. Mirrors the Rust-side
+// MAX_YOUTUBE_MESSAGE_CHARS so the UI can soft-validate input before
+// the IPC roundtrip. The API counts Unicode characters, not bytes.
+export const MAX_YOUTUBE_MESSAGE_CHARS = 200;
+
+export function sendMessage(
+  liveChatId: string,
+  text: string,
+): Promise<SendMessageOk> {
+  return invoke("youtube_send_message", { liveChatId, text });
 }
 
 const ALLOWED_HOSTS = ["accounts.google.com"];

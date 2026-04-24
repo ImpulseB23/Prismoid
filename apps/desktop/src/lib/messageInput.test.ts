@@ -59,6 +59,36 @@ describe("formatSendError", () => {
     expect(
       formatSendError({ kind: "helix", code: "", message: "blocked" }),
     ).toContain("blocked");
+    expect(
+      formatSendError({
+        kind: "message_too_long_chars",
+        max_chars: 200,
+      }),
+    ).toContain("200");
+    expect(
+      formatSendError({
+        kind: "youtube",
+        code: "unauthorized",
+        message: "x",
+      }),
+    ).toMatch(/sign in/i);
+    expect(
+      formatSendError({
+        kind: "youtube",
+        code: "quota_exceeded",
+        message: "x",
+      }),
+    ).toMatch(/quota/i);
+    expect(
+      formatSendError({
+        kind: "youtube",
+        code: "youtube_api",
+        message: "chat ended",
+      }),
+    ).toContain("chat ended");
+    expect(
+      formatSendError({ kind: "youtube", code: "", message: "blocked" }),
+    ).toContain("blocked");
   });
 });
 
@@ -79,7 +109,9 @@ describe("toSendError", () => {
       { kind: "auth", message: "x" },
       { kind: "json", message: "x" },
       { kind: "message_too_long", max_bytes: 500 },
+      { kind: "message_too_long_chars", max_chars: 200 },
       { kind: "helix", code: "c", message: "m" },
+      { kind: "youtube", code: "c", message: "m" },
     ];
     for (const c of cases) {
       expect(toSendError(c)).toBe(c);

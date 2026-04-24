@@ -30,6 +30,8 @@ export function formatSendError(err: SendMessageError): string {
       return "Message is empty.";
     case "message_too_long":
       return `Message exceeds ${err.max_bytes} bytes.`;
+    case "message_too_long_chars":
+      return `Message exceeds ${err.max_chars} characters.`;
     case "sidecar_not_running":
       return "Chat connection is not ready yet.";
     case "auth":
@@ -42,6 +44,17 @@ export function formatSendError(err: SendMessageError): string {
       return err.code
         ? `Twitch rejected message (${err.code}): ${err.message}`
         : `Twitch rejected message: ${err.message}`;
+    case "youtube":
+      switch (err.code) {
+        case "unauthorized":
+          return "YouTube session expired. Sign in again.";
+        case "quota_exceeded":
+          return "YouTube daily quota exceeded. Try again later.";
+        default:
+          return err.code
+            ? `YouTube rejected message (${err.code}): ${err.message}`
+            : `YouTube rejected message: ${err.message}`;
+      }
   }
 }
 
@@ -59,7 +72,9 @@ const VARIANT_GUARDS: Record<
   auth: (v) => typeof v.message === "string",
   json: (v) => typeof v.message === "string",
   message_too_long: (v) => typeof v.max_bytes === "number",
+  message_too_long_chars: (v) => typeof v.max_chars === "number",
   helix: (v) => typeof v.code === "string" && typeof v.message === "string",
+  youtube: (v) => typeof v.code === "string" && typeof v.message === "string",
 };
 
 // Strict guard for objects coming back from Tauri's invoke reject path.

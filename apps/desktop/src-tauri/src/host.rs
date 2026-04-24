@@ -234,6 +234,49 @@ pub fn build_send_chat_message_line(args: SendChatMessageArgs<'_>) -> serde_json
     Ok(bytes)
 }
 
+/// Arguments for [`build_youtube_send_message_line`]. Mirrors the
+/// Twitch shape but trimmed to what the YouTube Data API needs (no
+/// client_id, no broadcaster/sender split — the access token's owner
+/// is implicitly the sender, and the destination is keyed by the
+/// `live_chat_id`).
+pub struct YouTubeSendMessageArgs<'a> {
+    pub access_token: &'a str,
+    pub live_chat_id: &'a str,
+    pub message: &'a str,
+    /// Opaque correlation id echoed back in the sidecar's
+    /// `send_chat_result` notification. Shared registry with Twitch
+    /// sends — request_ids are unique per [`crate::sidecar_commands::Pending`]
+    /// so the platform of origin doesn't need to be encoded here.
+    pub request_id: u64,
+}
+
+/// Serializes a `youtube_send_message` control command line for the
+/// sidecar. The sidecar issues a YouTube Data API
+/// `POST /liveChat/messages` and replies with the standard
+/// `send_chat_result` notification shape.
+pub fn build_youtube_send_message_line(
+    args: YouTubeSendMessageArgs<'_>,
+) -> serde_json::Result<Vec<u8>> {
+    #[derive(Serialize)]
+    struct SendCmd<'a> {
+        cmd: &'a str,
+        token: &'a str,
+        live_chat_id: &'a str,
+        message: &'a str,
+        request_id: u64,
+    }
+    let cmd = SendCmd {
+        cmd: "youtube_send_message",
+        token: args.access_token,
+        live_chat_id: args.live_chat_id,
+        message: args.message,
+        request_id: args.request_id,
+    };
+    let mut bytes = serde_json::to_vec(&cmd)?;
+    bytes.push(b'\n');
+    Ok(bytes)
+}
+
 /// Serializes a `token_refresh` control command line for the sidecar.
 /// The sidecar updates the access token on all running Twitch clients
 /// so the next EventSub reconnect uses a fresh credential.
@@ -806,5 +849,24 @@ mod tests {
         let parsed: serde_json::Value = serde_json::from_slice(body).unwrap();
         assert_eq!(parsed["cmd"], "token_refresh");
         assert_eq!(parsed["token"], "fresh-tok");
+    }
+
+    #[test]
+    fn build_youtube_send_message_line_serializes_required_fields() {
+        let line = build_youtube_send_message_line(YouTubeSendMessageArgs {
+            access_token: "yt-tok",
+            live_chat_id: "Cg0KC0xpdmVfQ2hhdF9JZA==",
+            message: "hello yt",
+            request_id: 17,
+        })
+        .unwrap();
+        assert_eq!(line.last(), Some(&b'\n'));
+        let body = &line[..line.len() - 1];
+        let parsed: serde_json::Value = serde_json::from_slice(body).unwrap();
+        assert_eq!(parsed["cmd"], "youtube_send_message");
+        assert_eq!(parsed["token"], "yt-tok");
+        assert_eq!(parsed["live_chat_id"], "Cg0KC0xpdmVfQ2hhdF9JZA==");
+        assert_eq!(parsed["message"], "hello yt");
+        assert_eq!(parsed["request_id"], 17);
     }
 }

@@ -79,11 +79,13 @@ export type SendMessageError =
   | { kind: "not_logged_in"; message: string }
   | { kind: "empty_message" }
   | { kind: "message_too_long"; max_bytes: number }
+  | { kind: "message_too_long_chars"; max_chars: number }
   | { kind: "sidecar_not_running" }
   | { kind: "io"; message: string }
   | { kind: "auth"; message: string }
   | { kind: "json"; message: string }
-  | { kind: "helix"; code: string; message: string };
+  | { kind: "helix"; code: string; message: string }
+  | { kind: "youtube"; code: string; message: string };
 
 export const MAX_CHAT_MESSAGE_BYTES = 500;
 

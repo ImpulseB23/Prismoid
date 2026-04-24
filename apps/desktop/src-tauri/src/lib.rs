@@ -61,6 +61,7 @@ pub fn run() {
             youtube_auth::commands::youtube_cancel_login,
             youtube_auth::commands::youtube_logout,
             sidecar_commands::twitch_send_message,
+            sidecar_commands::youtube_send_message,
         ])
         .setup(setup)
         .run(tauri::generate_context!())
